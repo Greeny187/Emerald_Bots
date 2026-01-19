@@ -1,7 +1,9 @@
 """Affiliate Bot - Referral System"""
 
 import logging
+from multiprocessing import context
 import os
+from turtle import update
 from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
@@ -48,15 +50,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     logger.info(f"/start from user={user.id} chat_type={chat.type} args={context.args}")
-    
+
+    # Ensure the starter has a commission row (so stats/link always work)
+    ensure_commission_row(user.id)
+
     # Check for referral parameter
     if context.args and context.args[0].startswith("aff_"):
-        referrer_id = int(context.args[0].replace("aff_", ""))
-        if referrer_id != user.id:
+        try:
+            referrer_id = int(context.args[0].replace("aff_", ""))
+        except Exception:
+            referrer_id = None
+
+        if referrer_id and referrer_id != user.id:
             ensure_commission_row(referrer_id)
-            create_referral(referrer_id, user.id)
+            # store the referrer's link for traceability (optional, but useful)
+            create_referral(referrer_id, user.id, referral_link=build_referral_link(referrer_id))
             logger.info(f"New referral: {user.id} referred by {referrer_id}")
-    
+
     if chat.type == "private":
         welcome_text = (
             "💚 **Emerald Affiliate Program**\n\n"
@@ -90,6 +100,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ])
         await update.message.reply_text("Wähle eine Option:", reply_markup=keyboard)
+        
+        # Show the user's reflink immediately (owner-friendly + zero confusion)
+        my_link = build_referral_link(user.id)
+        await update.message.reply_text(
+            f"🔗 **Dein Reflink**\n\n`{my_link}`\n\n📌 Tipp: Teile genau diesen Link, damit Story-Sharing & Rewards korrekt zugeordnet werden.",
+            parse_mode="Markdown"
+        )
+        
     else:
         await update.message.reply_text("💚 Affiliate Program aktiv!")
 
