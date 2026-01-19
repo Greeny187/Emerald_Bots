@@ -261,6 +261,47 @@ def init_db(cur):
         );
         """
     )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS emrd_points(
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            balance NUMERIC NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(chat_id, user_id)
+        );
+        """
+    )
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS emrd_point_events(
+            id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            reason TEXT NOT NULL,
+            delta NUMERIC NOT NULL,
+            meta JSONB,
+            ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)        
+    
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS emrd_claims(
+            claim_id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            amount NUMERIC NOT NULL,
+            wallet_address TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            tx_hash TEXT,
+            note TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            processed_at TIMESTAMPTZ
+        );
+    """)
+    
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_emrd_claims_user ON emrd_claims(user_id, created_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_emrd_claims_status ON emrd_claims(status, created_at ASC);")
     
     # Globale Key/Value-Config (für bot-übergreifende Settings wie Rewards/Token)
     cur.execute(
@@ -2852,17 +2893,6 @@ def get_last_agg_stat_date(cur, chat_id: int):
     return row[0]  # date | None
 
 @_with_cursor
-def guess_agg_start_date(cur, chat_id: int):
-    # frühestes Datum aus daily_stats oder message_logs
-    cur.execute("SELECT MIN(stat_date) FROM daily_stats WHERE chat_id=%s;", (chat_id,))
-    ds = (cur.fetchone() or [None])[0]
-    cur.execute("SELECT MIN(created_at)::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
-    ml = (cur.fetchone() or [None])[0]
-    if ds and ml:
-        return ds if ds <= ml else ml
-    return ds or ml or date.today()
-
-@_with_cursor
 def set_pro_until(cur, chat_id: int, until: datetime | None, tier: str = "pro"):
     if until is not None and until <= datetime.now(ZoneInfo("UTC")):
         cur.execute("""
@@ -3181,7 +3211,7 @@ def delete_group_data(cur, chat_id: int):
 
     # Logs & Statistiken
     cur.execute("DELETE FROM message_logs      WHERE chat_id=%s;", (chat_id,))
-    cur.execute("DELETE FROM member_events     WHERE chat_id=%s OR group_id=%s;", (chat_id, chat_id))
+    cur.execute("DELETE FROM member_events WHERE chat_id=%s;", (chat_id,))
     cur.execute("DELETE FROM daily_stats       WHERE chat_id=%s;", (chat_id,))
     cur.execute("DELETE FROM agg_group_day     WHERE chat_id=%s;", (chat_id,))
     cur.execute("DELETE FROM spam_events       WHERE chat_id=%s;", (chat_id,))
@@ -3456,9 +3486,10 @@ def list_members(cur, chat_id: int) -> list[int]:
         WHERE chat_id = %s
         UNION
         SELECT DISTINCT user_id FROM member_events
-        WHERE group_id = %s
+        WHERE chat_id = %s
         ORDER BY user_id
     """, (chat_id, chat_id))
+    
     return [row[0] for row in cur.fetchall()]
 
 @_with_cursor
@@ -3467,8 +3498,33 @@ def remove_member(cur, chat_id: int, user_id: int):
     Entfernt einen Mitglied aus den lokalen Tracking-Tabellen.
     """
     cur.execute("DELETE FROM message_logs WHERE chat_id = %s AND user_id = %s", (chat_id, user_id))
-    cur.execute("DELETE FROM member_events WHERE group_id = %s AND user_id = %s", (chat_id, user_id))
+    cur.execute("DELETE FROM member_events WHERE chat_id = %s AND user_id = %s", (chat_id, user_id))
     logger.debug(f"[clean_delete] Removed user {user_id} from tracking tables for {chat_id}")
+
+@_with_cursor
+def guess_agg_start_date(cur, chat_id: int):
+    cur.execute("SELECT MIN(stat_date) FROM daily_stats WHERE chat_id=%s;", (chat_id,))
+    ds = (cur.fetchone() or [None])[0]
+
+    # message_logs: created_at existiert bei dir nicht → fallback auf timestamp
+    cur.execute("""
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema=current_schema()
+           AND table_name='message_logs'
+           AND column_name IN ('created_at','timestamp')
+         ORDER BY CASE column_name WHEN 'created_at' THEN 1 ELSE 2 END
+         LIMIT 1;
+    """)
+    col = (cur.fetchone() or [None])[0] or "timestamp"
+
+    cur.execute(f"SELECT MIN({col})::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
+    ml = (cur.fetchone() or [None])[0]
+
+    if ds and ml:
+        return ds if ds <= ml else ml
+    return ds or ml or date.today()
+
 
 # --- Legacy Migration Utility ---
 def migrate_db():
