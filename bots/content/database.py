@@ -179,21 +179,6 @@ def ensure_bot_key_param(params: tuple, bot_key: str) -> tuple:
     """
     return (*params, bot_key)
 
-def _alter_table_safe(cur, sql: str):
-    """
-    Führt ein ALTER/CREATE sicher aus.
-    - Ignoriert fehlende Tabellen (Relation does not exist)
-    - Loggt andere Fehler nur als Warning
-    """
-    try:
-        cur.execute(sql)
-    except Exception as e:
-        msg = str(e).lower()
-        if "does not exist" in msg or "relation" in msg and "does not exist" in msg:
-            logger.debug("Schema-Skip (Tabelle fehlt): %s", sql)
-        else:
-            logger.warning("Schema-Änderung fehlgeschlagen: %s  --  %s", sql, e)
-
 @_with_cursor
 def ensure_multi_bot_schema(cur):
     """
