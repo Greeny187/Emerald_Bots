@@ -246,47 +246,6 @@ def init_db(cur):
         );
         """
     )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS emrd_points(
-            chat_id BIGINT NOT NULL,
-            user_id BIGINT NOT NULL,
-            balance NUMERIC NOT NULL DEFAULT 0,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY(chat_id, user_id)
-        );
-        """
-    )
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS emrd_point_events(
-            id BIGSERIAL PRIMARY KEY,
-            chat_id BIGINT NOT NULL,
-            user_id BIGINT NOT NULL,
-            reason TEXT NOT NULL,
-            delta NUMERIC NOT NULL,
-            meta JSONB,
-            ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-    """)        
-    
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS emrd_claims(
-            claim_id BIGSERIAL PRIMARY KEY,
-            chat_id BIGINT NOT NULL,
-            user_id BIGINT NOT NULL,
-            amount NUMERIC NOT NULL,
-            wallet_address TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            tx_hash TEXT,
-            note TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            processed_at TIMESTAMPTZ
-        );
-    """)
-    
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_emrd_claims_user ON emrd_claims(user_id, created_at DESC);")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_emrd_claims_status ON emrd_claims(status, created_at ASC);")
     
     # Globale Key/Value-Config (für bot-übergreifende Settings wie Rewards/Token)
     cur.execute(
@@ -811,6 +770,8 @@ def init_db(cur):
     except Exception:
         pass
 
+    _pending_inputs_col(cur)
+
 @_with_cursor
 def migrate_stats_rollup(cur):
     # Tages-Rollup pro Gruppe & Datum
@@ -986,8 +947,7 @@ def effective_ai_mod_policy(chat_id:int, topic_id:int|None) -> dict:
     }
     if topic_id:
         ov = get_ai_mod_settings(chat_id, topic_id)
-        if ov: 
-            base.update({k:v for k,v in ov.items() if v is not None})
+        if ov: base.update({k:v for k,v in ov.items() if v is not None})
     return base
 
 @_with_cursor
@@ -2445,18 +2405,12 @@ def effective_spam_policy(cur, chat_id:int, topic_id:int|None, link_flags=None, 
     if row:
         base["level"] = (row[0] or "off").lower()
         base["user_whitelist"] = list(row[1] or [])
-        if row[2] is not None: 
-            base["emoji_max_per_msg"] = int(row[2] or 0)
-        if row[3] is not None: 
-            base["emoji_max_per_min"] = int(row[3] or 0)
-        if row[4] is not None: 
-            base["max_msgs_per_10s"] = int(row[4] or 0)
-        if row[5] is not None: 
-            base["action_primary"] = row[5] or base["action_primary"]
-        if row[6] is not None: 
-            base["action_secondary"] = row[6] or base["action_secondary"]
-        if row[7] is not None: 
-            base["escalation_threshold"] = int(row[7] or base["escalation_threshold"])
+        if row[2] is not None: base["emoji_max_per_msg"] = int(row[2] or 0)
+        if row[3] is not None: base["emoji_max_per_min"] = int(row[3] or 0)
+        if row[4] is not None: base["max_msgs_per_10s"] = int(row[4] or 0)
+        if row[5] is not None: base["action_primary"] = row[5] or base["action_primary"]
+        if row[6] is not None: base["action_secondary"] = row[6] or base["action_secondary"]
+        if row[7] is not None: base["escalation_threshold"] = int(row[7] or base["escalation_threshold"])
     else:
         base["user_whitelist"] = []
 
@@ -2763,13 +2717,10 @@ def get_rss_feeds(cur) -> List[Tuple[int, str, int]]:
 def set_rss_feed_options(cur, chat_id:int, url:str, *, post_images:bool|None=None, enabled:bool|None=None):
     parts, params = [], []
     if post_images is not None:
-        parts.append("post_images=%s")
-        params.append(post_images)
+        parts.append("post_images=%s"); params.append(post_images)
     if enabled is not None:
-        parts.append("enabled=%s")
-        params.append(enabled)
-    if not parts:
-        return
+        parts.append("enabled=%s"); params.append(enabled)
+    if not parts: return
     sql = "UPDATE rss_feeds SET " + ", ".join(parts) + " WHERE chat_id=%s AND url=%s;"
     cur.execute(sql, params + [chat_id, url])
 
@@ -2822,12 +2773,8 @@ def get_ai_settings(cur, chat_id:int) -> tuple[bool,bool]:
 @_with_cursor
 def set_ai_settings(cur, chat_id:int, faq:bool|None=None, rss:bool|None=None):
     parts, params = [], []
-    if faq is not None: 
-        parts.append("ai_faq_enabled=%s")
-        params.append(faq)
-    if rss is not None: 
-        parts.append("ai_rss_summary=%s")
-        params.append(rss)
+    if faq is not None: parts.append("ai_faq_enabled=%s"); params.append(faq)
+    if rss is not None: parts.append("ai_rss_summary=%s"); params.append(rss)
     if not parts: 
         return
     sql = "INSERT INTO group_settings(chat_id) VALUES (%s) ON CONFLICT (chat_id) DO UPDATE SET " + ", ".join(parts)
@@ -2874,6 +2821,18 @@ def get_last_agg_stat_date(cur, chat_id: int):
     cur.execute("SELECT MAX(stat_date) FROM agg_group_day WHERE chat_id=%s;", (chat_id,))
     row = cur.fetchone()
     return row[0]  # date | None
+
+@_with_cursor
+def guess_agg_start_date(cur, chat_id: int):
+    # frühestes Datum aus daily_stats oder message_logs
+    cur.execute("SELECT MIN(stat_date) FROM daily_stats WHERE chat_id=%s;", (chat_id,))
+    ds = (cur.fetchone() or [None])[0]
+    # message_logs hat eine Spalte `timestamp` (nicht `created_at`).
+    cur.execute("SELECT MIN(timestamp)::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
+    ml = (cur.fetchone() or [None])[0]
+    if ds and ml:
+        return ds if ds <= ml else ml
+    return ds or ml or date.today()
 
 @_with_cursor
 def set_pro_until(cur, chat_id: int, until: datetime | None, tier: str = "pro"):
@@ -3194,7 +3153,7 @@ def delete_group_data(cur, chat_id: int):
 
     # Logs & Statistiken
     cur.execute("DELETE FROM message_logs      WHERE chat_id=%s;", (chat_id,))
-    cur.execute("DELETE FROM member_events WHERE chat_id=%s;", (chat_id,))
+    cur.execute("DELETE FROM member_events     WHERE chat_id=%s OR group_id=%s;", (chat_id, chat_id))
     cur.execute("DELETE FROM daily_stats       WHERE chat_id=%s;", (chat_id,))
     cur.execute("DELETE FROM agg_group_day     WHERE chat_id=%s;", (chat_id,))
     cur.execute("DELETE FROM spam_events       WHERE chat_id=%s;", (chat_id,))
@@ -3361,36 +3320,17 @@ def set_night_mode(cur, chat_id: int,
                    write_lock=None,
                    lock_message=None):
     parts, params = [], []
-    if enabled is not None:
-        parts.append("enabled=%s")
-        params.append(enabled)
-    if start_minute is not None:
-        parts.append("start_minute=%s")
-        params.append(start_minute)
-    if end_minute is not None:
-        parts.append("end_minute=%s")
-        params.append(end_minute)
-    if delete_non_admin_msgs is not None:
-        parts.append("delete_non_admin_msgs=%s")
-        params.append(delete_non_admin_msgs)
-    if warn_once is not None:
-        parts.append("warn_once=%s")
-        params.append(warn_once)
-    if timezone is not None:
-        parts.append("timezone=%s")
-        params.append(timezone)
-    if hard_mode is not None:
-        parts.append("hard_mode=%s")
-        params.append(hard_mode)
-    if override_until is not None:
-        parts.append("override_until=%s")
-        params.append(override_until)
+    if enabled is not None: parts.append("enabled=%s"); params.append(enabled)
+    if start_minute is not None: parts.append("start_minute=%s"); params.append(start_minute)
+    if end_minute is not None: parts.append("end_minute=%s"); params.append(end_minute)
+    if delete_non_admin_msgs is not None: parts.append("delete_non_admin_msgs=%s"); params.append(delete_non_admin_msgs)
+    if warn_once is not None: parts.append("warn_once=%s"); params.append(warn_once)
+    if timezone is not None: parts.append("timezone=%s"); params.append(timezone)
+    if hard_mode is not None: parts.append("hard_mode=%s"); params.append(hard_mode)
+    if override_until is not None: parts.append("override_until=%s"); params.append(override_until)
     if write_lock is not None: 
-        parts.append("write_lock=%s")
-        params.append(write_lock)
-    if lock_message is not None: 
-        parts.append("lock_message=%s")
-        params.append(lock_message)
+        parts.append("write_lock=%s"); params.append(write_lock)
+    if lock_message is not None: parts.append("lock_message=%s"); params.append(lock_message)
 
     if not parts:
         return
@@ -3469,10 +3409,9 @@ def list_members(cur, chat_id: int) -> list[int]:
         WHERE chat_id = %s
         UNION
         SELECT DISTINCT user_id FROM member_events
-        WHERE chat_id = %s
+        WHERE group_id = %s
         ORDER BY user_id
     """, (chat_id, chat_id))
-    
     return [row[0] for row in cur.fetchall()]
 
 @_with_cursor
@@ -3481,33 +3420,8 @@ def remove_member(cur, chat_id: int, user_id: int):
     Entfernt einen Mitglied aus den lokalen Tracking-Tabellen.
     """
     cur.execute("DELETE FROM message_logs WHERE chat_id = %s AND user_id = %s", (chat_id, user_id))
-    cur.execute("DELETE FROM member_events WHERE chat_id = %s AND user_id = %s", (chat_id, user_id))
+    cur.execute("DELETE FROM member_events WHERE group_id = %s AND user_id = %s", (chat_id, user_id))
     logger.debug(f"[clean_delete] Removed user {user_id} from tracking tables for {chat_id}")
-
-@_with_cursor
-def guess_agg_start_date(cur, chat_id: int):
-    cur.execute("SELECT MIN(stat_date) FROM daily_stats WHERE chat_id=%s;", (chat_id,))
-    ds = (cur.fetchone() or [None])[0]
-
-    # message_logs: created_at existiert bei dir nicht → fallback auf timestamp
-    cur.execute("""
-        SELECT column_name
-          FROM information_schema.columns
-         WHERE table_schema=current_schema()
-           AND table_name='message_logs'
-           AND column_name IN ('created_at','timestamp')
-         ORDER BY CASE column_name WHEN 'created_at' THEN 1 ELSE 2 END
-         LIMIT 1;
-    """)
-    col = (cur.fetchone() or [None])[0] or "timestamp"
-
-    cur.execute(f"SELECT MIN({col})::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
-    ml = (cur.fetchone() or [None])[0]
-
-    if ds and ml:
-        return ds if ds <= ml else ml
-    return ds or ml or date.today()
-
 
 # --- Legacy Migration Utility ---
 def migrate_db():
