@@ -3,7 +3,6 @@
 import logging
 from multiprocessing import context
 import os
-from turtle import update
 from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
