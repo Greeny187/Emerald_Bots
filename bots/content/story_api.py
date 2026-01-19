@@ -485,7 +485,9 @@ async def get_user_stories(request: web.Request) -> web.Response:
     try:
         user_id = int(request.match_info.get("user_id", 0) or 0)
         uid = _resolve_uid(request)
-        if uid <= 0 or uid != user_id:
+        if uid <= 0:
+            return _json(request, {"success": False, "error": "auth_required"}, status=403)
+        if uid != user_id:
             return _json(request, {"success": False, "error": "forbidden"}, status=403)
 
         limit = int(request.rel_url.query.get("limit", 10) or 10)

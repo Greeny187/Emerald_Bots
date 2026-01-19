@@ -29,7 +29,7 @@ from .database import (register_group, get_registered_groups, get_rules, set_wel
     toggle_topic_router_rule, get_matching_router_rule, upsert_forum_topic, rename_forum_topic, find_faq_answer, log_auto_response, get_ai_settings,
     effective_spam_policy, count_topic_user_messages_today, decay_strikes,
     set_user_wallet, get_user_wallet, log_member_event,
-    effective_ai_mod_policy, log_ai_mod_action, count_ai_hits_today, add_strike_points, get_strike_points, top_strike_users, decay_strikes
+    effective_ai_mod_policy, log_ai_mod_action, count_ai_hits_today, add_strike_points, get_strike_points, top_strike_users
     )
 from zoneinfo import ZoneInfo
 from .patchnotes import __version__, PATCH_NOTES
@@ -882,12 +882,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Ich helfe dir, deine Telegram-Gruppe automatisch zu verwalten "
             "inklusive Schutz, Statistiken, Rollenverwaltung, Captcha u.v.m.\n\n"
             "Support: https://t.me/EmeraldEcosystem \n"
-            "❓ Mehr Infos: [Zur Website](https://greeny187.github.io/EmeraldContent/)\n\n"
+            "❓ Mehr Infos: [Zur Website](https://greeny187.github.io/EmeraldContentBots/)\n\n"
             "🎁 *Unterstütze das Projekt:*\n"
             "• TON Wallet: `UQBopac1WFJGC_K48T8JqcbRoH3evUoUDwS2oItlS-SgpR8L`\n"
             "• PayPal: emerald@mail.de\n\n"
-            "✅ Gruppe registriert! Geh privat auf /miniapp.")
-
+            "✅ Gruppe registriert! Geh privat zu mir auf Start und richte den Bot ein."
+        )
     if chat.type == "private":
         all_groups = get_registered_groups()
         visible_groups = await get_visible_groups(user.id, context.bot, all_groups)
