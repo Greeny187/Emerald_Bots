@@ -2827,9 +2827,19 @@ def guess_agg_start_date(cur, chat_id: int):
     # frühestes Datum aus daily_stats oder message_logs
     cur.execute("SELECT MIN(stat_date) FROM daily_stats WHERE chat_id=%s;", (chat_id,))
     ds = (cur.fetchone() or [None])[0]
-    # message_logs hat eine Spalte `timestamp` (nicht `created_at`).
-    cur.execute("SELECT MIN(timestamp)::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
-    ml = (cur.fetchone() or [None])[0]
+    ml = None
+    # message_logs hat in neuen Schemas `timestamp`.
+    try:
+        cur.execute("SELECT MIN(timestamp)::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
+        ml = (cur.fetchone() or [None])[0]
+    except Exception:
+        # Legacy fallback: früher wurde vereinzelt `created_at` genutzt.
+        try:
+            cur.execute("SELECT MIN(created_at)::date FROM message_logs WHERE chat_id=%s;", (chat_id,))
+            ml = (cur.fetchone() or [None])[0]
+        except Exception:
+            ml = None
+
     if ds and ml:
         return ds if ds <= ml else ml
     return ds or ml or date.today()
