@@ -17,9 +17,28 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 MINIMUM_PAYOUT = int(os.getenv("AFFILIATE_MINIMUM_PAYOUT", "1000"))
 EMRD_CONTRACT = os.getenv("EMRD_CONTRACT", "EQA0rJDTy_2sS30KxQW8HO0_ERqmOGUhMWlwdL-2RpDmCrK5")
 
+@web.middleware
+async def cors_middleware(request, handler):
+    # Handle CORS preflight (needed because fetch uses application/json)
+    if request.method == "OPTIONS":
+        resp = web.Response(status=204)
+    else:
+        resp = await handler(request)
+
+    origin = request.headers.get("Origin", "*")
+    resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
 
 async def register_miniapp(webapp):
     """Register Affiliate miniapp routes"""
+    # ensure CORS is enabled for MiniApp calls from GitHub Pages / Telegram WebView
+    if cors_middleware not in getattr(webapp, "middlewares", []):
+        webapp.middlewares.append(cors_middleware)
+
     webapp.router.add_get("/api/affiliate/stats", get_stats)
     webapp.router.add_post("/api/affiliate/stats", get_stats)
     webapp.router.add_post("/api/affiliate/payout", request_payout_route)

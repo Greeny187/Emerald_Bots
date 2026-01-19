@@ -40,6 +40,16 @@ def init_all_schemas():
             )
         """)
         
+        # Global referrer mapping (ONE referrer per user across ALL bots, first-touch wins)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS aff_user_referrers (
+                user_id BIGINT PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                source_bot VARCHAR(64),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
         # Conversions table (no FK to aff_referrals: referrer_id is a Telegram user id, not aff_referrals.id)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS aff_conversions (
@@ -106,6 +116,8 @@ def init_all_schemas():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_referrals_referrer ON aff_referrals(referrer_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_conversions_referrer ON aff_conversions(referrer_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_payouts_referrer ON aff_payouts(referrer_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_user_referrers_referrer ON aff_user_referrers(referrer_id)")
+
 
         conn.commit()
         logger.info("Affiliate schemas initialized")
@@ -170,6 +182,13 @@ def create_referral(referrer_id, referral_id, referral_link: str | None = None):
             ON CONFLICT DO NOTHING
         """, (referrer_id, referral_id, referral_link))
         
+        # Global mapping: first-touch wins (do NOT overwrite existing referrer)
+        cur.execute("""
+            INSERT INTO aff_user_referrers (user_id, referrer_id, source_bot)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+        """, (referral_id, referrer_id, os.getenv("BOT_USERNAME")))
+        
         conn.commit()
         return True
     except Exception as e:
@@ -182,6 +201,25 @@ def create_referral(referrer_id, referral_id, referral_link: str | None = None):
         if conn:
             conn.close()
 
+def get_global_referrer(user_id: int) -> int | None:
+    """Returns the global referrer for a user (if set)."""
+    conn = get_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT referrer_id FROM aff_user_referrers WHERE user_id=%s", (user_id,))
+        row = cur.fetchone()
+        return int(row[0]) if row else None
+    except Exception as e:
+        logger.error(f"get_global_referrer error: {e}")
+        return None
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        conn.close()
 
 def record_conversion(referrer_id, referral_id, conversion_type, value):
     """Record conversion event"""
