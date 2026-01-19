@@ -156,7 +156,7 @@ async def _is_admin(app, chat_id: int, user_id: int) -> bool:
         return False
 
 
-async def register_story_api(webapp):
+def register_story_api(webapp):
     # Schema init
     init_story_sharing_schema()
 

@@ -2072,12 +2072,7 @@ def register_miniapp_routes(webapp, app):
     # --- Story-Sharing API (Emerald) ---
     try:
         from .story_api import register_story_api
-        res = register_story_api(webapp)
-        if inspect.iscoroutine(res):
-            try:
-                asyncio.get_running_loop().create_task(res)
-            except RuntimeError:
-                logger.warning("[miniapp] Story API coroutine konnte nicht geplant werden (kein event loop)")
+        register_story_api(webapp)
     except Exception as e:  # ✅ Fehlender except Block
         logger.warning(f"[miniapp] Story API registration failed: {e}")
     webapp["_miniapp_routes_attached"] = True
