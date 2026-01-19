@@ -3,7 +3,8 @@ import datetime
 import re
 import logging
 import random
-import time, telegram
+import time
+import telegram
 from collections import deque
 from datetime import date
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, ForceReply, ChatPermissions
@@ -91,8 +92,10 @@ async def safe_send_welcome(bot, db, chat_id, text, topic_id, file_id, parse_mod
                 await bot.send_photo(chat_id, file_id, caption=text, parse_mode=parse_mode)
             else:
                 await bot.send_message(chat_id, text, parse_mode=parse_mode)
-            try: db.clear_welcome_topic(chat_id)
-            except Exception: pass
+            try: 
+                db.clear_welcome_topic(chat_id)
+            except Exception: 
+                pass
             return
 
         # Caption zu lang -> Foto ohne Caption + Text separat
@@ -117,8 +120,10 @@ async def safe_send_welcome(bot, db, chat_id, text, topic_id, file_id, parse_mod
         # Ungültiges/abgelaufenes file_id -> zumindest Text senden & Medienfelder heilen
         if "wrong file identifier" in msg or "file not found" in msg:
             await bot.send_message(chat_id, text, parse_mode=parse_mode)
-            try: db.clear_welcome_media(chat_id)
-            except Exception: pass
+            try: 
+                db.clear_welcome_media(chat_id)
+            except Exception: 
+                pass
             return
 
         raise
@@ -182,7 +187,8 @@ def _aimod_acquire(context, chat_id:int, max_per_min:int) -> bool:
     if len(q) >= max_per_min:
         context.bot_data[key] = q
         return False
-    q.append(now); context.bot_data[key] = q
+    q.append(now); 
+    context.bot_data[key] = q
     return True
 
 def _parse_hhmm(txt: str) -> int | None:
@@ -888,19 +894,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• PayPal: emerald@mail.de\n\n"
             "✅ Gruppe registriert! Geh privat zu mir auf Start und richte den Bot ein."
         )
-    if chat.type == "private":
-        all_groups = get_registered_groups()
-        visible_groups = await get_visible_groups(user.id, context.bot, all_groups)
-
-        if not visible_groups:
-            return await update.message.reply_text(
-                "ðŸš« Du bist in keiner Gruppe Admin, in der der Bot aktiv ist.\n"
-                "âž• FÃ¼ge den Bot in eine Gruppe ein und gib ihm Adminrechte."
-            )
-
-        keyboard = [[InlineKeyboardButton(title, callback_data=f"group_{cid}")] for cid, title in visible_groups]
-        markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("ðŸ”§ WÃ¤hle eine Gruppe:", reply_markup=markup)
 
 async def forum_topic_registry_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
