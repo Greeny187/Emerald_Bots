@@ -5,8 +5,21 @@ from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from .config import BOT_TOKEN, APP_BASE_URL, ALLOWED_PROVIDERS, SECRET_KEY, TELEGRAM_LOGIN_TTL_SECONDS, PRO_DEFAULT, PRO_USERS
-from .db import execute, fetch, fetchrow
+from .config import (
+    BOT_TOKEN,
+    APP_BASE_URL,
+    MINIAPP_URL,
+    ALLOWED_PROVIDERS,
+    SECRET_KEY,
+    TELEGRAM_LOGIN_TTL_SECONDS,
+    PRO_DEFAULT,
+    PRO_USERS,
+    MARKET_CACHE_TTL_SECONDS,
+    SIGNAL_ATR_MULT_STOP,
+    SIGNAL_ATR_MULT_TP,
+    ALERT_CHECK_INTERVAL_SECONDS,
+)
+from .database import execute, fetch, fetchrow, fetchval, init_schema
 from .crypto_utils import encrypt_blob, decrypt_blob
 from .providers.base import ProviderCredentials
 from .providers.kraken import KrakenProvider
@@ -27,149 +40,7 @@ PROVIDER_MAP = {
     "mexc": MexcProvider,
 }
 
-# SQL Schema - erweitert mit User-Settings, Portfolios, Alerts, Trading History
-INIT_SQL = """
--- API Keys (verschlüsselt)
-create table if not exists tradeapi_keys (
-  id bigserial primary key,
-  telegram_id bigint not null,
-  provider text not null,
-  label text,
-  api_fields_enc text not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique(telegram_id, provider, coalesce(label,''))
-);
-create index if not exists tradeapi_keys_tid_idx on tradeapi_keys(telegram_id);
-
--- User Settings & Preferences
-create table if not exists tradeapi_user_settings (
-  telegram_id bigint primary key,
-  theme text default 'dark',
-  notifications_enabled boolean default true,
-  alert_threshold_usd numeric(18,2) default 100.00,
-  preferred_currency text default 'USD',
-  language text default 'de',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
--- Portfolios
-create table if not exists tradeapi_portfolios (
-  id bigserial primary key,
-  telegram_id bigint not null,
-  name text,
-  description text,
-  total_value numeric(18,8),
-  cash numeric(18,8),
-  risk_level text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique(telegram_id, name)
-);
-create index if not exists tradeapi_portfolios_tid_idx on tradeapi_portfolios(telegram_id);
-
--- Portfolio Positions
-create table if not exists tradeapi_positions (
-  id bigserial primary key,
-  portfolio_id bigint references tradeapi_portfolios(id) on delete cascade,
-  asset_symbol text,
-  quantity numeric(18,8),
-  entry_price numeric(18,8),
-  current_price numeric(18,8),
-  cost_basis numeric(18,8),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-create index if not exists tradeapi_positions_pid_idx on tradeapi_positions(portfolio_id);
-
--- Trading Alerts
-create table if not exists tradeapi_alerts (
-  id bigserial primary key,
-  telegram_id bigint not null,
-  symbol text,
-  alert_type text,
-  target_price numeric(18,8),
-  comparison text,
-  is_active boolean default true,
-  is_triggered boolean default false,
-  created_at timestamptz not null default now(),
-  triggered_at timestamptz
-);
-create index if not exists tradeapi_alerts_tid_idx on tradeapi_alerts(telegram_id);
-create index if not exists tradeapi_alerts_active_idx on tradeapi_alerts(is_active) where is_active = true;
-
--- Trading Signals
-create table if not exists tradeapi_signals (
-  id bigserial primary key,
-  telegram_id bigint not null,
-  symbol text,
-  signal_type text,
-  confidence numeric(3,2),
-  strength numeric(3,2),
-  atr_value numeric(18,8),
-  entry_price numeric(18,8),
-  stop_loss numeric(18,8),
-  take_profit numeric(18,8),
-  position_size numeric(18,8),
-  created_at timestamptz not null default now()
-);
-create index if not exists tradeapi_signals_tid_idx on tradeapi_signals(telegram_id);
-
--- Trading History
-create table if not exists tradeapi_trades (
-  id bigserial primary key,
-  telegram_id bigint not null,
-  portfolio_id bigint references tradeapi_portfolios(id),
-  symbol text,
-  side text,
-  quantity numeric(18,8),
-  entry_price numeric(18,8),
-  exit_price numeric(18,8),
-  commission numeric(18,8),
-  pnl numeric(18,8),
-  pnl_percent numeric(5,2),
-  status text,
-  opened_at timestamptz,
-  closed_at timestamptz,
-  notes text,
-  created_at timestamptz not null default now()
-);
-create index if not exists tradeapi_trades_tid_idx on tradeapi_trades(telegram_id);
-
--- Sentiment Analysis Cache
-create table if not exists tradeapi_sentiment (
-  id bigserial primary key,
-  text text,
-  sentiment text,
-  positive numeric(3,2),
-  neutral numeric(3,2),
-  negative numeric(3,2),
-  created_at timestamptz not null default now()
-);
-create index if not exists tradeapi_sentiment_created_idx on tradeapi_sentiment(created_at);
-
--- Market Data Cache
-create table if not exists tradeapi_market_cache (
-  id bigserial primary key,
-  symbol text,
-  provider text,
-  price numeric(18,8),
-  volume numeric(18,8),
-  change_24h numeric(5,2),
-  high_24h numeric(18,8),
-  low_24h numeric(18,8),
-  created_at timestamptz not null default now(),
-  unique(symbol, provider)
-);
-create index if not exists tradeapi_market_symbol_idx on tradeapi_market_cache(symbol);
-"""
-
-
-def init_schema():
-    for stmt in [s.strip() for s in INIT_SQL.split(";") if s.strip()]:
-        execute(stmt + ";")
-    ensure_proof_table()
+"""Server-side HTTP + Telegram integration for the Trade API MiniApp."""
 
 def verify_webapp_initdata(init_data: Dict[str, Any]) -> Dict[str, Any]:
     if not BOT_TOKEN:
@@ -203,11 +74,66 @@ def user_is_pro(telegram_id: int) -> bool:
 async def _json(data: Any, status: int = 200):
     return web.json_response(data, status=status)
 
+
+def _extract_sig_fields(sig: Any) -> Dict[str, Any]:
+    """Normalize whatever score_signal() returns to a consistent shape."""
+    signal_type = "FLAT"
+    confidence = 0.0
+    strength = 0.0
+
+    if isinstance(sig, dict):
+        raw_type = sig.get("signal_type") or sig.get("signal") or sig.get("action") or sig.get("side") or ""
+        signal_type = str(raw_type).upper() if raw_type else "FLAT"
+        try:
+            confidence = float(sig.get("confidence") if sig.get("confidence") is not None else sig.get("prob", 0.0))
+        except Exception:
+            confidence = 0.0
+        try:
+            strength = float(sig.get("strength") if sig.get("strength") is not None else sig.get("score", 0.0))
+        except Exception:
+            strength = 0.0
+    elif isinstance(sig, str):
+        signal_type = sig.upper()
+
+    # Common aliases
+    if signal_type in ("LONG", "BUY", "BULL"):
+        signal_type = "BUY"
+    elif signal_type in ("SHORT", "SELL", "BEAR"):
+        signal_type = "SELL"
+    elif signal_type in ("NONE", "NO_TRADE", "HOLD"):
+        signal_type = "FLAT"
+
+    return {"signal_type": signal_type, "confidence": confidence, "strength": strength}
+
+
+def _classify_regime(close: np.ndarray, atr_val: float) -> str:
+    """Very lightweight regime detection: trend/range + high volatility."""
+    if close.size < 20:
+        return "unknown"
+    entry = float(close[-1]) if close.size else 0.0
+    atr_pct = (atr_val / entry) if entry else 0.0
+
+    n = int(min(close.size, 60))
+    x = np.arange(n, dtype=float)
+    y = close[-n:].astype(float)
+    try:
+        slope = float(np.polyfit(x, y, 1)[0])
+        slope_pct = slope / entry if entry else 0.0
+    except Exception:
+        slope_pct = 0.0
+
+    if atr_pct >= 0.06:
+        return "high_vol"
+    if abs(slope_pct) >= 0.0006:
+        return "trend"
+    return "range"
+
 # ---------- Basic API ----------
 async def tradeapi_auth(request: web.Request):
     payload = await request.json()
     try:
-        u = verify_webapp_initdata(payload)
+        init_data = payload if isinstance(payload, dict) and "hash" in payload else (payload.get("initData") or {})
+        u = verify_webapp_initdata(init_data)
     except Exception as e:
         return await _json({"error": str(e)}, 400)
     return await _json({"ok": True, "telegram_id": u["telegram_id"], "username": u.get("username")})
@@ -218,7 +144,11 @@ async def providers(request: web.Request):
 async def keys_list(request: web.Request):
     tid = int(request.query.get("telegram_id") or 0)
     if not tid: return await _json({"error":"telegram_id required"}, 400)
-    rows = fetch("select id, provider, coalesce(label,'') as label, created_at, updated_at from tradeapi_keys where telegram_id=%s order by provider, label", (tid,))
+    rows = fetch(
+        "select id, provider, label, created_at, updated_at "
+        "from tradeapi_keys where telegram_id=%s order by provider, label",
+        (tid,),
+    )
     return await _json({"items": rows})
 
 async def keys_upsert(request: web.Request):
@@ -232,7 +162,8 @@ async def keys_upsert(request: web.Request):
     if not provider: return await _json({"error":"provider required"}, 400)
     if provider not in [p["id"] for p in ALLOWED_PROVIDERS]:
         return await _json({"error":"provider not allowed"}, 400)
-    label = (body.get("label") or "").strip() or None
+    # `label` is stored as NOT NULL default '' (see database.py)
+    label = (body.get("label") or "").strip()
     fields = {
         "api_key":     (body.get("api_key") or "").strip(),
         "api_secret":  (body.get("api_secret") or "").strip(),
@@ -247,9 +178,11 @@ async def keys_upsert(request: web.Request):
     if count >= 1 and not user_is_pro(tid):
         return await _json({"error":"Mehrere APIs sind nur in der Pro-Version erlaubt."}, 402)
     blob = encrypt_blob(SECRET_KEY, fields)
-    execute(            "insert into tradeapi_keys(telegram_id, provider, label, api_fields_enc) values (%s,%s,%s,%s) "
-        "on conflict (telegram_id, provider, coalesce(label,'')) do update set api_fields_enc=excluded.api_fields_enc, updated_at=now()",
-        (tid, provider, label, blob)
+    execute(
+        "insert into tradeapi_keys(telegram_id, provider, label, api_fields_enc) values (%s,%s,%s,%s) "
+        "on conflict (telegram_id, provider, label) do update "
+        "set api_fields_enc=excluded.api_fields_enc, updated_at=now()",
+        (tid, provider, label, blob),
     )
     return await _json({"ok": True})
 
@@ -320,14 +253,93 @@ async def signal_generate(request: web.Request):
     ohlcv = np.array(body.get("ohlcv") or [], dtype=float)
     if ohlcv.shape[1] if ohlcv.size else 0 != 5:
         return await _json({"error":"ohlcv must be Nx5 [O,H,L,C,V]"}, 400)
-    sig = score_signal(ohlcv)
-    high, low, close = ohlcv[:,1], ohlcv[:,2], ohlcv[:,3]
+    sig_raw = score_signal(ohlcv)
+    sig = _extract_sig_fields(sig_raw)
+    high, low, close = ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3]
     atr_val = float(atr(high, low, close))
-    # simplistic balance assumption 1000 USD if no API or balance endpoint wired
-    bal = float(body.get("balance_usd") or 1000.0)
     entry = float(close[-1])
-    size = position_size(bal, entry, atr_val)
-    payload = {"signal": sig, "atr": atr_val, "pos_size": size, "entry": entry, "symbol": symbol, "provider": provider}
+    regime = _classify_regime(close, atr_val)
+
+    # ---- Risk settings (per user) ----
+    risk_row = fetchrow(
+        "select risk_per_trade, min_confidence from tradeapi_user_risk where telegram_id=%s",
+        (tid,),
+    )
+    if not risk_row:
+        execute("insert into tradeapi_user_risk(telegram_id) values(%s) on conflict do nothing", (tid,))
+        risk_row = {"risk_per_trade": 0.005, "min_confidence": 0.6}
+    risk_per_trade = float(risk_row.get("risk_per_trade") or 0.005)
+    min_conf = float(risk_row.get("min_confidence") or 0.6)
+
+    # Balance: if not supplied, assume a small test account
+    bal = float(body.get("balance_usd") or 1000.0)
+
+    # Gate by min confidence
+    if sig["confidence"] < min_conf:
+        sig["signal_type"] = "FLAT"
+
+    # Simple regime gating: in extreme volatility we only act on high confidence
+    if regime == "high_vol" and sig["confidence"] < max(min_conf, 0.75):
+        sig["signal_type"] = "FLAT"
+
+    stop_dist = float(atr_val * SIGNAL_ATR_MULT_STOP)
+    tp_dist = float(atr_val * SIGNAL_ATR_MULT_TP)
+
+    # Position sizing: try your existing helper first, otherwise fallback to risk-based sizing
+    size = 0.0
+    if sig["signal_type"] in ("BUY", "SELL") and stop_dist > 0:
+        try:
+            size = float(position_size(bal, entry, atr_val, risk_per_trade=risk_per_trade))
+        except TypeError:
+            risk_amt = bal * risk_per_trade
+            size = float(risk_amt / stop_dist)
+        except Exception:
+            risk_amt = bal * risk_per_trade
+            size = float(risk_amt / stop_dist)
+
+    stop_loss = 0.0
+    take_profit = 0.0
+    if sig["signal_type"] == "BUY":
+        stop_loss = entry - stop_dist
+        take_profit = entry + tp_dist
+    elif sig["signal_type"] == "SELL":
+        stop_loss = entry + stop_dist
+        take_profit = entry - tp_dist
+
+    # Persist the signal (so your /dashboard and /signals can show real history)
+    execute(
+        "insert into tradeapi_signals(telegram_id, symbol, signal_type, confidence, strength, regime, atr_value, entry_price, stop_loss, take_profit, position_size) "
+        "values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (
+            tid,
+            symbol,
+            sig["signal_type"],
+            float(sig["confidence"]),
+            float(sig["strength"]),
+            regime,
+            atr_val,
+            entry,
+            stop_loss or None,
+            take_profit or None,
+            size,
+        ),
+    )
+
+    payload = {
+        "symbol": symbol,
+        "provider": provider,
+        "entry": entry,
+        "regime": regime,
+        "atr": atr_val,
+        "signal": sig_raw,
+        "signal_type": sig["signal_type"],
+        "confidence": sig["confidence"],
+        "strength": sig["strength"],
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "position_size": size,
+        "risk_per_trade": risk_per_trade,
+    }
     proof = record_proof(tid, provider or "na", symbol, payload)
     return await _json({"ok": True, "payload": payload, "proof": proof})
 
@@ -336,6 +348,58 @@ async def proof_list(request: web.Request):
     if not tid: return await _json({"error":"telegram_id required"}, 400)
     rows = list_proofs(tid, limit=50)
     return await _json({"items": rows})
+
+
+async def list_signals(request: web.Request):
+    """Get recent signals (GET /tradeapi/signals?telegram_id=...&limit=...&symbol=...)."""
+    tid = int(request.query.get("telegram_id") or 0)
+    if not tid:
+        return await _json({"error": "telegram_id required"}, 400)
+    limit = int(request.query.get("limit") or 50)
+    limit = max(1, min(limit, 200))
+    symbol = (request.query.get("symbol") or "").upper().strip()
+    if symbol:
+        rows = fetch(
+            "select symbol, signal_type, confidence, strength, regime, entry_price, stop_loss, take_profit, position_size, created_at "
+            "from tradeapi_signals where telegram_id=%s and symbol=%s order by created_at desc limit %s",
+            (tid, symbol, limit),
+        )
+    else:
+        rows = fetch(
+            "select symbol, signal_type, confidence, strength, regime, entry_price, stop_loss, take_profit, position_size, created_at "
+            "from tradeapi_signals where telegram_id=%s order by created_at desc limit %s",
+            (tid, limit),
+        )
+    return await _json({"ok": True, "signals": rows})
+
+
+async def api_signals_post(request: web.Request):
+    """Compatibility endpoint for older miniapps that POST /api/tradeapi/signals."""
+    body = await request.json()
+    try:
+        u = verify_webapp_initdata(body.get("initData") or {})
+    except Exception as e:
+        return await _json({"error": str(e)}, 401)
+
+    # optional filter
+    limit = int(body.get("limit") or 50)
+    symbol = (body.get("symbol") or "").upper().strip()
+    # build a fake query-based path by calling list_signals logic inline
+    tid = u["telegram_id"]
+    limit = max(1, min(limit, 200))
+    if symbol:
+        rows = fetch(
+            "select symbol, signal_type, confidence, strength, regime, entry_price, stop_loss, take_profit, position_size, created_at "
+            "from tradeapi_signals where telegram_id=%s and symbol=%s order by created_at desc limit %s",
+            (tid, symbol, limit),
+        )
+    else:
+        rows = fetch(
+            "select symbol, signal_type, confidence, strength, regime, entry_price, stop_loss, take_profit, position_size, created_at "
+            "from tradeapi_signals where telegram_id=%s order by created_at desc limit %s",
+            (tid, limit),
+        )
+    return await _json({"status": "ok", "signals": rows, "ok": True})
 
 # ---------- Sentiment + Portfolio ----------
 async def sentiment_analyze(request: web.Request):
@@ -559,73 +623,203 @@ async def delete_alert(request: web.Request):
     execute("delete from tradeapi_alerts where id=%s and telegram_id=%s", (aid, tid))
     return await _json({"ok": True})
 
+
+async def api_alerts_post(request: web.Request):
+    """Compatibility endpoint for older miniapps that POST /api/tradeapi/alerts."""
+    body = await request.json()
+    try:
+        u = verify_webapp_initdata(body.get("initData") or {})
+    except Exception as e:
+        return await _json({"error": str(e)}, 401)
+
+    action = (body.get("action") or "get").lower()
+    # Support the old stub contract: {action:'get'|'create', ...}
+    if action == "create":
+        symbol = (body.get("symbol") or "").upper()
+        alert_type = body.get("alert_type", "price")
+        target_price = float(body.get("target_price") or 0)
+        comparison = body.get("comparison", "above")
+        if not symbol or target_price <= 0:
+            return await _json({"error": "Symbol und Target Price erforderlich"}, 400)
+        execute(
+            "insert into tradeapi_alerts(telegram_id, symbol, alert_type, target_price, comparison, is_active) values(%s,%s,%s,%s,%s,true)",
+            (u["telegram_id"], symbol, alert_type, target_price, comparison),
+        )
+    # Always return current alerts
+    rows = fetch(
+        "select id, symbol, alert_type, target_price, comparison, is_active, is_triggered, created_at, triggered_at "
+        "from tradeapi_alerts where telegram_id=%s order by created_at desc limit 100",
+        (u["telegram_id"],),
+    )
+    return await _json({"status": "ok", "ok": True, "alerts": rows})
+
 # ---------- Market Data & Price Update ----------
+async def _provider_public_ticker(provider_id: str, symbol: str) -> Optional[Dict[str, Any]]:
+    """Best-effort ticker fetch (works even if provider implementations differ)."""
+    Prov = PROVIDER_MAP.get(provider_id)
+    if not Prov:
+        return None
+
+    # Provider classes in your ecosystem usually accept credentials; for public endpoints, dummy creds are fine.
+    try:
+        p = Prov(ProviderCredentials("", "", None, {}))
+    except Exception:
+        try:
+            p = Prov(None)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    for meth in (
+        "ticker",
+        "get_ticker",
+        "fetch_ticker",
+        "public_ticker",
+        "market_price",
+        "price",
+    ):
+        if hasattr(p, meth):
+            try:
+                res = await getattr(p, meth)(symbol)
+                if res is None:
+                    continue
+                if isinstance(res, (int, float)):
+                    return {"price": float(res)}
+                if isinstance(res, dict):
+                    return res
+            except Exception:
+                continue
+    return None
+
+
 async def get_market_price(request: web.Request):
     symbol = request.query.get("symbol", "BTCUSDT").upper()
     provider = request.query.get("provider", "kraken")
+    force = request.query.get("refresh", "false").lower() in ("1", "true", "yes")
+    ttl_s = int(MARKET_CACHE_TTL_SECONDS)
     
     # Try cache first
-    row = fetchrow(
-        "select price, volume, change_24h, high_24h, low_24h, created_at from tradeapi_market_cache "
-        "where symbol=%s and provider=%s and created_at > now() - interval '1 minute'",
-        (symbol, provider)
-    )
+    row = None
+    if not force:
+        row = fetchrow(
+            f"select price, volume, change_24h, high_24h, low_24h, created_at from tradeapi_market_cache "
+            f"where symbol=%s and provider=%s and created_at > now() - interval '{ttl_s} seconds'",
+            (symbol, provider),
+        )
     
     if row:
         return await _json({"ok": True, "cached": True, "data": row})
     
-    return await _json({"ok": True, "cached": False, "data": None})
+    # Fetch fresh ticker
+    t = await _provider_public_ticker(provider, symbol)
+    if not t:
+        return await _json({"ok": True, "cached": False, "data": None, "warning": "ticker fetch failed"})
+
+    # Normalize common keys
+    def _f(k: str) -> Optional[float]:
+        v = t.get(k)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    price = _f("price") or _f("last") or _f("close")
+    volume = _f("volume") or _f("vol")
+    change_24h = _f("change_24h") or _f("change")
+    high_24h = _f("high_24h") or _f("high")
+    low_24h = _f("low_24h") or _f("low")
+
+    if price is None:
+        return await _json({"ok": True, "cached": False, "data": None, "warning": "no price in ticker"})
+
+    execute(
+        "insert into tradeapi_market_cache(symbol, provider, price, volume, change_24h, high_24h, low_24h, created_at) "
+        "values(%s,%s,%s,%s,%s,%s,%s,now()) "
+        "on conflict(symbol, provider) do update set price=excluded.price, volume=excluded.volume, change_24h=excluded.change_24h, "
+        "high_24h=excluded.high_24h, low_24h=excluded.low_24h, created_at=now()",
+        (symbol, provider, price, volume, change_24h, high_24h, low_24h),
+    )
+
+    data = {
+        "price": price,
+        "volume": volume,
+        "change_24h": change_24h,
+        "high_24h": high_24h,
+        "low_24h": low_24h,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    return await _json({"ok": True, "cached": False, "data": data})
 
 # ---------- Dashboard & Analytics ----------
-async def get_dashboard(request: web.Request):
-    tid = int(request.query.get("telegram_id") or 0)
-    if not tid: return await _json({"error": "telegram_id required"}, 400)
-    
+def _resolve_miniapp_url() -> str:
+    # Prefer serving your own static if APP_BASE_URL is set
+    if APP_BASE_URL:
+        return f"{APP_BASE_URL}/static/apptradeapi.html"
+    return MINIAPP_URL
+
+
+def _build_dashboard_data(tid: int) -> Dict[str, Any]:
     # Get portfolios
     portfolios = fetch(
         "select id, name, total_value from tradeapi_portfolios where telegram_id=%s order by created_at desc",
-        (tid,)
+        (tid,),
     )
-    
+
     # Get recent signals
     signals = fetch(
         "select symbol, signal_type, confidence, entry_price, position_size, created_at "
         "from tradeapi_signals where telegram_id=%s order by created_at desc limit 5",
-        (tid,)
+        (tid,),
     )
-    
+
     # Get active alerts
     alerts = fetch(
         "select symbol, alert_type, target_price from tradeapi_alerts "
         "where telegram_id=%s and is_active=true order by created_at desc limit 5",
-        (tid,)
+        (tid,),
     )
-    
+
     # Get settings
     settings = fetchrow("select theme, language from tradeapi_user_settings where telegram_id=%s", (tid,))
     if not settings:
         settings = {"theme": "dark", "language": "de"}
-    
+
     total_portfolio_value = sum(float(p.get("total_value") or 0) for p in portfolios)
-    
-    return await _json({
-        "ok": True,
-        "dashboard": {
-            "total_portfolio_value": total_portfolio_value,
-            "portfolio_count": len(portfolios),
-            "active_alerts": len(alerts),
-            "recent_signals": len(signals),
-            "portfolios": portfolios,
-            "recent_signals": signals,
-            "active_alerts": alerts,
-            "settings": settings
-        }
-    })
+
+    return {
+        "total_portfolio_value": total_portfolio_value,
+        "portfolio_count": len(portfolios),
+        "active_alerts": len(alerts),
+        "recent_signals": len(signals),
+        "portfolios": portfolios,
+        "recent_signals": signals,
+        "active_alerts": alerts,
+        "settings": settings,
+    }
+
+
+async def get_dashboard(request: web.Request):
+    tid = int(request.query.get("telegram_id") or 0)
+    if not tid: return await _json({"error": "telegram_id required"}, 400)
+
+    return await _json({"ok": True, "dashboard": _build_dashboard_data(tid)})
+
+
+async def api_dashboard_post(request: web.Request):
+    """Compatibility endpoint for older miniapps that POST /api/tradeapi/dashboard."""
+    body = await request.json()
+    try:
+        u = verify_webapp_initdata(body.get("initData") or {})
+    except Exception as e:
+        return await _json({"error": str(e)}, 401)
+
+    return await _json({"ok": True, "dashboard": _build_dashboard_data(u["telegram_id"])})
 
 # ---------- Telegram Commands ----------
 
 async def _start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    url = f"{APP_BASE_URL}/static/apptradeapi.html" if APP_BASE_URL else "https://example.com/static/apptradeapi.html"
+    url = _resolve_miniapp_url()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(text="🔐 Trading-API MiniApp öffnen", web_app=WebAppInfo(url=url))]])
     await update.message.reply_text(
         "🚀 **Emerald Trade API Bot** — v0.2\n\n"
@@ -646,9 +840,9 @@ async def _me(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     
     keys = fetch(
-        "select provider, coalesce(label,'') as label, updated_at from tradeapi_keys "
+        "select provider, label, updated_at from tradeapi_keys "
         "where telegram_id=%s order by provider, label",
-        (tid,)
+        (tid,),
     )
     
     portfolios = fetch(
@@ -677,7 +871,7 @@ async def _me(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text += f"\n**Aktive Alerts:** {alert_count}\n"
     text += f"\n_Klicke auf den Button unten, um die MiniApp zu öffnen!_"
     
-    url = f"{APP_BASE_URL}/static/apptradeapi.html" if APP_BASE_URL else "https://example.com/static/apptradeapi.html"
+    url = _resolve_miniapp_url()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(text="📊 MiniApp öffnen", web_app=WebAppInfo(url=url))]])
     
     await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -711,7 +905,7 @@ async def _help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 Klicke unten, um die App zu starten!"""
     
-    url = f"{APP_BASE_URL}/static/apptradeapi.html" if APP_BASE_URL else "https://example.com/static/apptradeapi.html"
+    url = _resolve_miniapp_url()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(text="🚀 App starten", web_app=WebAppInfo(url=url))]])
     
     await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -723,17 +917,117 @@ def register(application: Application):
     application.add_handler(CommandHandler("help", _help))
 
 def register_jobs(application: Application):
-    """Register background jobs (placeholder)"""
-    # TODO: Jobs für Alert-Checks, Portfolio-Updates, etc.
-    pass
+    """Register background jobs (alerts etc.)."""
+    if not getattr(application, "job_queue", None):
+        logger.warning("No job_queue available; alert checks disabled")
+        return
+
+    application.job_queue.run_repeating(
+        _alert_check_job,
+        interval=int(ALERT_CHECK_INTERVAL_SECONDS),
+        first=10,
+        name="tradeapi_alert_check",
+    )
+
+
+async def _alert_check_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Checks active alerts and notifies users in Telegram."""
+    rows = fetch(
+        "select id, telegram_id, symbol, target_price, comparison from tradeapi_alerts "
+        "where is_active=true and is_triggered=false order by created_at asc limit 200"
+    )
+    if not rows:
+        return
+
+    for a in rows:
+        try:
+            tid = int(a["telegram_id"])
+            symbol = str(a["symbol"] or "").upper()
+            target = float(a["target_price"] or 0)
+            comp = str(a.get("comparison") or "above").lower()
+            if not symbol or target <= 0:
+                continue
+
+            # Pick a provider: most recent key, else default
+            provider = fetchval(
+                "select provider from tradeapi_keys where telegram_id=%s order by updated_at desc limit 1",
+                (tid,),
+            ) or "kraken"
+
+            cache = fetchrow(
+                "select price from tradeapi_market_cache where symbol=%s and provider=%s",
+                (symbol, provider),
+            )
+            price = None
+            if cache and cache.get("price") is not None:
+                try:
+                    price = float(cache["price"])
+                except Exception:
+                    price = None
+
+            if price is None:
+                t = await _provider_public_ticker(str(provider), symbol)
+                if not t:
+                    continue
+                try:
+                    price = float(t.get("price") or t.get("last") or t.get("close"))
+                except Exception:
+                    price = None
+                if price is None:
+                    continue
+
+                # Store into cache (best effort)
+                try:
+                    execute(
+                        "insert into tradeapi_market_cache(symbol, provider, price, created_at) values(%s,%s,%s,now()) "
+                        "on conflict(symbol, provider) do update set price=excluded.price, created_at=now()",
+                        (symbol, provider, price),
+                    )
+                except Exception:
+                    pass
+
+            trig = (comp == "above" and price >= target) or (comp == "below" and price <= target)
+            if not trig:
+                continue
+
+            execute(
+                "update tradeapi_alerts set is_triggered=true, is_active=false, triggered_at=now() where id=%s",
+                (int(a["id"]),),
+            )
+
+            msg = (
+                f"🔔 Alert ausgelöst\n\n"
+                f"Symbol: {symbol}\n"
+                f"Ziel: {target}\n"
+                f"Preis: {price}\n"
+                f"Vergleich: {comp}"
+            )
+            try:
+                await ctx.application.bot.send_message(chat_id=tid, text=msg)
+            except Exception:
+                logger.info("Could not DM user %s for alert", tid)
+
+        except Exception as e:
+            logger.warning("Alert job error: %s", e)
 
 def register_miniapp_routes(webapp: web.Application, application: Application):
     """Register HTTP API routes"""
     init_schema()
+    # Proof table lives in a separate module (kept for your ecosystem compatibility)
+    try:
+        ensure_proof_table()
+    except Exception as e:
+        logger.warning("Proof table init skipped/failed: %s", e)
     
     # Auth & Providers
     webapp.router.add_post( "/tradeapi/auth",               tradeapi_auth)
     webapp.router.add_get(  "/tradeapi/providers",          providers)
+
+    # Backwards-compatible routes (older miniapp builds)
+    webapp.router.add_post( "/api/tradeapi/auth",           tradeapi_auth)
+    webapp.router.add_post( "/api/tradeapi/dashboard",      api_dashboard_post)
+    webapp.router.add_post( "/api/tradeapi/signals",        api_signals_post)
+    webapp.router.add_post( "/api/tradeapi/alerts",         api_alerts_post)
     
     # API Key Management
     webapp.router.add_get(  "/tradeapi/keys",               keys_list)
@@ -744,6 +1038,7 @@ def register_miniapp_routes(webapp: web.Application, application: Application):
     
     # Signals & Risk
     webapp.router.add_post( "/tradeapi/signal/generate",    signal_generate)
+    webapp.router.add_get(  "/tradeapi/signals",            list_signals)
     webapp.router.add_get(  "/tradeapi/proof/list",         proof_list)
     
     # Sentiment & Portfolio

@@ -770,8 +770,6 @@ def init_db(cur):
     except Exception:
         pass
 
-    _pending_inputs_col(cur)
-
 @_with_cursor
 def migrate_stats_rollup(cur):
     # Tages-Rollup pro Gruppe & Datum
