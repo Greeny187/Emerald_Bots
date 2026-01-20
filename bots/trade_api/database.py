@@ -169,7 +169,7 @@ def init_all_schemas():
                 id BIGSERIAL PRIMARY KEY,
                 telegram_id BIGINT NOT NULL,
                 provider TEXT NOT NULL,
-                label TEXT,
+                label TEXT NOT NULL DEFAULT '',
                 api_fields_enc TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
