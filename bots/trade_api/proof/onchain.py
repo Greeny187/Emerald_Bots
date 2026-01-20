@@ -1,5 +1,7 @@
-import hashlib, json, time
-from ..db import execute, fetch
+import hashlib
+import json
+import time
+from ..database import execute, fetch
 
 INIT_SQL = """
 create table if not exists tradeapi_signal_proofs (
