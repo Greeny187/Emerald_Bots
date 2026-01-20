@@ -4,8 +4,11 @@ def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) 
     tr = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
     if len(tr) < period:
         return float(tr.mean()) if len(tr) else 0.0
-    import pandas as pd
-    return float(pd.Series(tr).rolling(window=period).mean().iloc[-1])
+    # rolling mean ohne pandas (Heroku-freundlich)
+    if len(tr) < period:
+        return float(tr.mean()) if len(tr) else 0.0
+    window = tr[-period:]
+    return float(np.mean(window))
 
 def position_size(balance_usd: float, entry: float, atr_val: float, risk_pct: float = 0.01) -> float:
     # position size = risk capital / (ATR as $ stop width)

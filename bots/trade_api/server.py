@@ -311,7 +311,11 @@ async def keys_verify(request: web.Request):
         bals = await p.balances()
         return await _json({"ok": True, "balances": bals})
     except Exception as e:
-        return await _json({"ok": False, "error": str(e)})
+        # Wichtig: keine Secrets leaken, Fehler nur kurz
+        msg = str(e)
+        if "Incorrect padding" in msg or "binascii.Error" in msg:
+            msg = "Secret-Format ungültig (Base64). Bitte Secret exakt aus der Börse kopieren."
+        return await _json({"ok": False, "error": msg})
 
 async def keys_ping(request: web.Request):
     body = await request.json()
