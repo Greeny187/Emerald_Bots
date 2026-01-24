@@ -395,9 +395,13 @@ async def scan_env_bots() -> int:
             continue
         try:
             me = await _telegram_getme(token)
+            log.info(f"🤖 Bot detected from {key}: {me}")
+            
             username = me.get("username") or me.get("first_name") or key
             title    = me.get("first_name") or username
 
+            log.info(f"📝 Inserting: username={username}, title={title}, env_token_key={key}")
+            
             await execute("""
                 INSERT INTO dashboard_bots (username, title, env_token_key, is_active, meta)
                 VALUES (%s, %s, %s, TRUE, '{}'::jsonb)
@@ -408,9 +412,10 @@ async def scan_env_bots() -> int:
                     updated_at = NOW();
             """, (username, title, key))
             added += 1
+            log.info(f"✅ Bot '{username}' registered")
         except Exception as e:
-            logging.warning("scan_env_bots: %s -> %s", key, e)
-    logging.info("Bot auto-discovery completed (%d).", added)
+            log.error("scan_env_bots ERROR for %s: %s", key, e, exc_info=True)
+    log.info("Bot auto-discovery completed (%d).", added)
     return added
 
 # ------------------------------ tokens (JWT) ------------------------------
