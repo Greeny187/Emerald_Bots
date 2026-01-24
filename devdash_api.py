@@ -388,7 +388,7 @@ async def scan_env_bots() -> int:
     import re
     added = 0
     for key, token in os.environ.items():
-        if not re.fullmatch(r'BOT([A-Z0-9_]+)?_TOKEN', key):
+        if not re.fullmatch(r'BOT[0-9A-Z_]*_TOKEN', key):
             continue
         token = (token or '').strip()
         if not token:
