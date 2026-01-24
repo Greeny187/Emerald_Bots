@@ -1679,53 +1679,54 @@ def register_devdash_routes(app: web.Application):
     app["_devdash_routes_registered"] = True
 
     # WICHTIG: add_route("GET", ...) statt add_get(), damit kein automatisches HEAD registriert wird
-    app.router.add_route("GET",  "/devdash/healthz",              healthz)
-    app.router.add_route("GET",  "/devdash/auth/check",           auth_check)
-    app.router.add_post(        "/devdash/dev-login",             dev_login)
-    app.router.add_post(        "/devdash/auth/telegram",         auth_telegram)
-    app.router.add_post(        "/devdash/auth/ton-wallet",       auth_ton_wallet)
-    app.router.add_post(        "/devdash/auth/near-wallet",      auth_near_wallet)
-    app.router.add_route("GET", "/devdash/me",                    me)
+    # Routes unter /api/devdash (nicht nur /devdash)
+    app.router.add_route("GET",  "/api/devdash/healthz",              healthz)
+    app.router.add_route("GET",  "/api/devdash/auth/check",           auth_check)
+    app.router.add_post(        "/api/devdash/dev-login",             dev_login)
+    app.router.add_post(        "/api/devdash/auth/telegram",         auth_telegram)
+    app.router.add_post(        "/api/devdash/auth/ton-wallet",       auth_ton_wallet)
+    app.router.add_post(        "/api/devdash/auth/near-wallet",      auth_near_wallet)
+    app.router.add_route("GET", "/api/devdash/me",                    me)
     
     # Metrics
-    app.router.add_route("GET", "/devdash/metrics/overview",      metrics_overview)
-    app.router.add_route("GET", "/devdash/metrics/timeseries",    metrics_timeseries)
+    app.router.add_route("GET", "/api/devdash/metrics/overview",      metrics_overview)
+    app.router.add_route("GET", "/api/devdash/metrics/timeseries",    metrics_timeseries)
     
     # Bots
-    app.router.add_route("GET", "/devdash/bots",                  bots_list)
-    app.router.add_post(        "/devdash/bots",                  bots_add)
-    app.router.add_post(        "/devdash/bots/refresh",          bots_refresh)
-    app.router.add_route("GET", "/devdash/bots/metrics",          bot_metrics)
-    app.router.add_route("GET", "/devdash/bots/endpoints",        bot_endpoints)
+    app.router.add_route("GET", "/api/devdash/bots",                  bots_list)
+    app.router.add_post(        "/api/devdash/bots",                  bots_add)
+    app.router.add_post(        "/api/devdash/bots/refresh",          bots_refresh)
+    app.router.add_route("GET", "/api/devdash/bots/metrics",          bot_metrics)
+    app.router.add_route("GET", "/api/devdash/bots/endpoints",        bot_endpoints)
     
     # Ads (Werbungen)
-    app.router.add_route("GET", "/devdash/ads",                   ads_list)
-    app.router.add_post(        "/devdash/ads",                   ads_create)
-    app.router.add_put(         "/devdash/ads/{id}",              ads_update)
-    app.router.add_delete(      "/devdash/ads/{id}",              ads_delete)
+    app.router.add_route("GET", "/api/devdash/ads",                   ads_list)
+    app.router.add_post(        "/api/devdash/ads",                   ads_create)
+    app.router.add_put(         "/api/devdash/ads/{id}",              ads_update)
+    app.router.add_delete(      "/api/devdash/ads/{id}",              ads_delete)
     
     # Token Events
-    app.router.add_route("GET", "/devdash/token-events",          token_events_list)
-    app.router.add_post(        "/devdash/token-events",          token_events_create)
+    app.router.add_route("GET", "/api/devdash/token-events",          token_events_list)
+    app.router.add_post(        "/api/devdash/token-events",          token_events_create)
     
     # User Management
-    app.router.add_route("GET", "/devdash/users",                 user_list)
-    app.router.add_post(        "/devdash/users/tier",            user_update_tier)
+    app.router.add_route("GET", "/api/devdash/users",                 user_list)
+    app.router.add_post(        "/api/devdash/users/tier",            user_update_tier)
     
     # Wallets & Payments
-    app.router.add_route("GET", "/devdash/near/account/overview", near_account_overview)
-    app.router.add_post(        "/devdash/wallets/near",          set_near_account)
-    app.router.add_route("GET", "/devdash/near/payments",         near_payments)
-    app.router.add_post(        "/devdash/wallets/ton",           set_ton_address)
-    app.router.add_route("GET", "/devdash/ton/payments",          ton_payments)
-    app.router.add_route("GET", "/devdash/wallets",               wallets_overview)
+    app.router.add_route("GET", "/api/devdash/near/account/overview", near_account_overview)
+    app.router.add_post(        "/api/devdash/wallets/near",          set_near_account)
+    app.router.add_route("GET", "/api/devdash/near/payments",         near_payments)
+    app.router.add_post(        "/api/devdash/wallets/ton",           set_ton_address)
+    app.router.add_route("GET", "/api/devdash/ton/payments",          ton_payments)
+    app.router.add_route("GET", "/api/devdash/wallets",               wallets_overview)
     
     # Mesh
-    app.router.add_route("GET", "/devdash/mesh/health",         mesh_health)
-    app.router.add_route("GET", "/devdash/mesh/metrics",        mesh_metrics)
+    app.router.add_route("GET", "/api/devdash/mesh/health",         mesh_health)
+    app.router.add_route("GET", "/api/devdash/mesh/metrics",        mesh_metrics)
     
-    # CORS
-    app.router.add_route("OPTIONS", "/devdash/{tail:.*}", options_handler)
+    # CORS - auch mit /api prefix
+    app.router.add_route("OPTIONS", "/api/devdash/{tail:.*}", options_handler)
     
     
         # Advanced Analytics
