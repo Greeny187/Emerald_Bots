@@ -387,6 +387,23 @@ async def ensure_tables():
         ON CONFLICT (chain, account_id) DO NOTHING;
         """)
         log.info("✅ All tables initialized successfully")
+        
+        # Migration: Update dashboard_ads placement constraint if old version exists
+        try:
+            log.info("⏳ Checking dashboard_ads placement constraint...")
+            await execute("""
+            ALTER TABLE dashboard_ads DROP CONSTRAINT IF EXISTS dashboard_ads_placement_check;
+            """)
+            await execute("""
+            ALTER TABLE dashboard_ads ADD CONSTRAINT dashboard_ads_placement_check 
+            CHECK (placement IN ('header','sidebar','in-bot','story','inline','banner'));
+            """)
+            log.info("✅ dashboard_ads placement constraint updated to include 'banner'")
+        except Exception as e:
+            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                log.info("✅ dashboard_ads placement constraint already correct")
+            else:
+                log.warning("⚠️  Could not update placement constraint: %s", e)
     except Exception as e:
         log.error("❌ Error during table initialization: %s", e, exc_info=True)
 
@@ -1897,7 +1914,9 @@ async def bot_detailed_info(request: web.Request):
             
             days_running = 0
             if bot['created_at']:
-                days_running = (datetime.datetime.utcnow() - bot['created_at']).days
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                created = bot['created_at'] if bot['created_at'].tzinfo else bot['created_at'].replace(tzinfo=datetime.timezone.utc)
+                days_running = (now_utc - created).days
             
             enriched.append({
                 'id': bot['id'],
