@@ -22,12 +22,14 @@ from .story_sharing import (
     get_top_shares,
     init_story_sharing_schema,
     STORY_TEMPLATES,
+    set_share_meta,
     get_share_by_id,
     count_shares_today,
     set_click_rewarded_steps,
 )
 from .story_card_generator import generate_share_card
-from .database import get_story_settings, get_group_title
+from .database import get_story_settings, get_group_title, get_group_agg_snapshot
+
 try:
     from shared.emrd_rewards import get_pending_rewards, create_reward_claim
 except Exception:
@@ -303,6 +305,22 @@ async def create_share(request: web.Request) -> web.Response:
         if not share:
             return _json(request, {"success": False, "error": "create_failed"}, status=500)
 
+        # Stats-Snapshot für echte Zahlen auf Card + Share-Text
+        stats_snapshot = None
+        if template == "stats":
+            try:
+                days = int((sharing.get("stats_days", 7) or 7))
+            except Exception:
+                days = 7
+            try:
+                stats_snapshot = get_group_agg_snapshot(chat_id, days=days) or {}
+            except Exception:
+                stats_snapshot = {"days": days, "messages_total": 0, "active_users": 0, "joins": 0, "leaves": 0, "spam_actions": 0}
+            try:
+                set_share_meta(share["share_id"], {"stats": stats_snapshot})
+            except Exception:
+                pass
+
         # optional: reward for sharing
         if award_points:
             try:
@@ -323,6 +341,24 @@ async def create_share(request: web.Request) -> web.Response:
         origin = f"{request.scheme}://{request.host}"
         card_url = f"{origin}/api/stories/card/share/{share['share_id']}"
 
+        # Share-Text für Nicht-Premium (t.me/share/url) mit echten Zahlen
+        title = share.get("title")
+        description = share.get("description")
+        if template == "stats" and isinstance(stats_snapshot, dict):
+            def fmt(n):
+                try:
+                    return f"{int(n):,}".replace(",", ".")
+                except Exception:
+                    return str(n)
+            msgs = stats_snapshot.get("messages_total", 0)
+            aus  = stats_snapshot.get("active_users", 0)
+            joins = stats_snapshot.get("joins", 0)
+            leaves = stats_snapshot.get("leaves", 0)
+            growth = int(joins or 0) - int(leaves or 0)
+            days = stats_snapshot.get("days", 7)
+            title = f"📊 {group_name} • {days} Tage"
+            description = f"{fmt(msgs)} Nachrichten · {fmt(aus)} aktiv · Wachstum {growth:+d}"
+
         return _json(request, {
             "success": True,
             "share": {
@@ -333,6 +369,8 @@ async def create_share(request: web.Request) -> web.Response:
                 "card_url": card_url,
                 "title": share.get("title"),
                 "description": share.get("description"),
+                "title": title,
+                "description": description,
             }
         })
     except Exception as e:
@@ -360,7 +398,8 @@ async def get_share_card_image(request: web.Request) -> web.Response:
         except Exception:
             pass
 
-        card_data = generate_share_card(template, group_name, referral_link)
+        meta = row.get("meta") or {}
+        card_data = generate_share_card(template, group_name, referral_link, meta=meta)
         if not card_data:
             return _json(request, {"success": False, "error": "card_failed"}, status=500)
 

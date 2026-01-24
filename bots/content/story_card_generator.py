@@ -4,7 +4,7 @@ Generiert automatisch Branding-Bilder für Story-Sharing
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import io
 import os
@@ -92,8 +92,9 @@ def generate_share_card(
     referral_link: str = "",
     user_display: str = "",
     width: int = 1080,
-    height: int = 1920
-) -> Optional[bytes]:
+    height: int = 1920,
+    meta: Optional[Dict[str, Any]] = None
+    ) -> Optional[bytes]:
     """
     Generate a story share card image
     
@@ -106,7 +107,15 @@ def generate_share_card(
             return None
         
         style = CARD_STYLES[template]
-        
+
+        # Spezial: Stats-Card mit echten Zahlen (Story-Format)
+        try:
+            stats = (meta or {}).get("stats") if isinstance(meta, dict) else None
+            if template == "stats" and isinstance(stats, dict):
+                return _generate_stats_story_card(group_name, stats, width=width, height=height)
+        except Exception:
+            pass
+
         # Skalierung (Story-Format): halte Proportionen flexibel
         scale = height / 1920.0
         def S(px: int) -> int:
@@ -166,7 +175,8 @@ def generate_share_card(
         draw.text((width // 2, cta_y), cta_text, fill=accent_color, font=text_font, anchor="mm")
         
         # Draw branding footer
-        footer_text = "emerald.systems | powered by TON"
+        footer_text = "https://greeny187.github.io/EmeraldContentBots/ | powered by TON"
+
         footer_y = int(height * 0.92)
         draw.text((width // 2, footer_y), footer_text, fill=(200, 200, 200), font=small_font, anchor="mm")
         
@@ -182,6 +192,94 @@ def generate_share_card(
         logger.error(f"Generate card error: {e}")
         return None
 
+def _fmt_short(n: Any) -> str:
+    try:
+        n = int(n or 0)
+    except Exception:
+        return str(n)
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M".replace(".0","")
+    if n >= 1_000:
+        return f"{n/1_000:.1f}k".replace(".0","")
+    return str(n)
+
+def _generate_stats_story_card(group_name: str, stats: Dict[str, Any], width: int = 1080, height: int = 1920) -> Optional[bytes]:
+    try:
+        # Basis
+        img = create_gradient_bg(width, height, "10C7A0", "0899C8")
+        overlay = Image.new('RGBA', (width, height), (0, 0, 0, 110))
+        img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+        draw = ImageDraw.Draw(img)
+
+        scale = height / 1920.0
+        def S(px: int) -> int:
+            return max(12, int(px * scale))
+
+        try:
+            title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", S(74))
+            sub_font   = ImageFont.truetype("DejaVuSans.ttf", S(44))
+            stat_font  = ImageFont.truetype("DejaVuSans-Bold.ttf", S(84))
+            label_font = ImageFont.truetype("DejaVuSans.ttf", S(36))
+            small_font = ImageFont.truetype("DejaVuSans.ttf", S(28))
+        except:
+            title_font = sub_font = stat_font = label_font = small_font = ImageFont.load_default()
+            
+        text_color   = hex_to_rgb(COLORS["light"])
+        accent_color = hex_to_rgb(COLORS["primary"])
+
+        days = stats.get("days", 7)
+        p_start = stats.get("period_start")
+        p_end = stats.get("period_end")
+        subtitle = f"Letzte {days} Tage"
+        if p_start and p_end:
+            subtitle = f"Letzte {days} Tage • {str(p_start)[5:]}–{str(p_end)[5:]}"
+
+        # Header
+        draw.text((width//2, int(height*0.14)), "📊 Gruppen-Statistik", fill=accent_color, font=title_font, anchor="mm")
+        draw.text((width//2, int(height*0.22)), f"📍 {group_name}", fill=text_color, font=sub_font, anchor="mm")
+        draw.text((width//2, int(height*0.28)), subtitle, fill=text_color, font=label_font, anchor="mm")
+
+        # Werte
+        msgs   = stats.get("messages_total", 0)
+        aus    = stats.get("active_users", 0)
+        joins  = stats.get("joins", 0)
+        leaves = stats.get("leaves", 0)
+        growth = int(joins or 0) - int(leaves or 0)
+
+        boxes = [
+            ("💬 Nachrichten", _fmt_short(msgs)),
+            ("👥 Aktive Nutzer", _fmt_short(aus)),
+            ("➕ Beitritte", _fmt_short(joins)),
+            ("📈 Wachstum", f"{growth:+d}"),
+        ]
+
+        # 2x2 Grid
+        grid_top = int(height*0.40)
+        pad = S(28)
+        bw = (width - pad*3)//2
+        bh = S(260)
+        for i,(label,val) in enumerate(boxes):
+            col = i % 2
+            row = i // 2
+            x0 = pad + col*(bw+pad)
+            y0 = grid_top + row*(bh+pad)
+            x1 = x0 + bw
+            y1 = y0 + bh
+            draw.rounded_rectangle([x0,y0,x1,y1], radius=S(28), outline=accent_color, width=S(4))
+            draw.text((x0 + bw//2, y0 + int(bh*0.40)), str(val), fill=accent_color, font=stat_font, anchor="mm")
+            draw.text((x0 + bw//2, y0 + int(bh*0.78)), label, fill=text_color, font=label_font, anchor="mm")
+
+        # Footer
+        draw.text((width//2, int(height*0.88)), "Mit Emerald Analytics 💚", fill=text_color, font=sub_font, anchor="mm")
+        draw.text((width//2, int(height*0.93)), "Support: t.me/EmeraldEcoSystem", fill=text_color, font=small_font, anchor="mm")
+
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG", quality=95)
+        img_bytes.seek(0)
+        return img_bytes.getvalue()
+    except Exception as e:
+        logger.error(f"Generate stats story card error: {e}")
+        return None
 
 def generate_stats_card(
     group_name: str,

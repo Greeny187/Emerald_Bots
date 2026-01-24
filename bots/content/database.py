@@ -4,7 +4,7 @@ import json
 import logging
 from urllib.parse import urlparse
 from datetime import date
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from psycopg2 import pool, OperationalError, InterfaceError
 from psycopg2.extras import Json
 from datetime import datetime, timedelta
@@ -2062,6 +2062,21 @@ def get_agg_summary(cur, chat_id:int, d_start, d_end):
         "spam_actions":     int(spam or 0),
         "night_deletes":    int(night_del or 0),
     }
+
+@_with_cursor
+def get_group_agg_snapshot(cur, chat_id: int, days: int = 7) -> Dict[str, Any]:
+    """Summary für Card/Share-Text: letzte X Tage (inkl. heute)."""
+    try:
+        days = max(1, int(days or 7))
+    except Exception:
+        days = 7
+    d_end = date.today()
+    d_start = d_end - timedelta(days=days - 1)
+    summary = get_agg_summary(cur, chat_id, d_start, d_end)
+    summary["days"] = days
+    summary["period_start"] = d_start.isoformat()
+    summary["period_end"] = d_end.isoformat()
+    return summary
 
 @_with_cursor
 def get_heatmap(cur, chat_id:int, ts_start, ts_end):

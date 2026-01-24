@@ -6,6 +6,7 @@ Settings/Rate-Limits werden pro Gruppe (chat_id) gesteuert (siehe database.get_s
 
 import logging
 import os
+import json
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
 
@@ -99,12 +100,14 @@ def init_story_sharing_schema() -> bool:
                     clicks INT DEFAULT 0,
                     conversions INT DEFAULT 0,
                     click_rewarded_steps INT DEFAULT 0,
+                    meta_json JSONB DEFAULT '{}'::jsonb,
                     status VARCHAR(50) DEFAULT 'shared'
                 )
             """)
 
             # kleine Migrationen (falls Tabelle bereits existiert)
             cur.execute("ALTER TABLE story_shares ADD COLUMN IF NOT EXISTS click_rewarded_steps INT DEFAULT 0;")
+            cur.execute("ALTER TABLE story_shares ADD COLUMN IF NOT EXISTS meta_json JSONB DEFAULT '{}'::jsonb;")
 
             # Story Click tracking
             cur.execute("""
@@ -200,12 +203,20 @@ def get_share_by_id(share_id: int) -> Optional[Dict[str, Any]]:
         with _conn() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, user_id, chat_id, story_template, referral_link, clicks, conversions, click_rewarded_steps, shared_at, status
+                SELECT id, user_id, chat_id, story_template, referral_link, clicks, conversions, click_rewarded_steps, shared_at, status, meta_json
                 FROM story_shares WHERE id=%s
             """, (share_id,))
             r = cur.fetchone()
             if not r:
                 return None
+            meta = r[10]
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if meta is None:
+                meta = {}
             return {
                 "share_id": int(r[0]),
                 "user_id": int(r[1]),
@@ -217,11 +228,27 @@ def get_share_by_id(share_id: int) -> Optional[Dict[str, Any]]:
                 "click_rewarded_steps": int(r[7] or 0),
                 "shared_at": r[8].isoformat() if r[8] else None,
                 "status": r[9] or "",
+                "meta": meta,
             }
     except Exception as e:
         logger.error(f"get_share_by_id error: {e}", exc_info=True)
         return None
 
+def set_share_meta(share_id: int, meta: Dict[str, Any]) -> bool:
+    """Merge-Update der meta_json am Share (JSONB)."""
+    try:
+        payload = json.dumps(meta or {}, ensure_ascii=False)
+        with _conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE story_shares SET meta_json = COALESCE(meta_json,'{}'::jsonb) || %s::jsonb WHERE id=%s;",
+                (payload, share_id)
+            )
+            conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"set_share_meta error: {e}", exc_info=True)
+        return False
 
 def set_click_rewarded_steps(share_id: int, steps: int) -> bool:
     """Merkt sich, bis zu welchem 10er-Step Click-Rewards bereits vergeben wurden."""
