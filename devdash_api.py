@@ -2016,7 +2016,7 @@ async def token_holders(request: web.Request):
 
 # ------------------------------ Bot-specific Details ----------------------------
 async def bot_details_overview(request: web.Request):
-    """Get comprehensive details for a specific bot from all available sources - FILTERED by bot_username"""
+    """Get detailed statistics for a specific bot based on its actual data tables"""
     await _auth_user(request)
     bot_username = request.query.get("bot")
     if not bot_username:
@@ -2040,32 +2040,43 @@ async def bot_details_overview(request: web.Request):
             # Affiliate stats
             "affiliate": {
                 "total_referrals": 0,
+                "unique_referrers": 0,
                 "converted_referrals": 0,
-                "total_commissions": 0.0,
+                "total_earned": 0.0,
+                "pending_commissions": 0.0,
                 "pending_payouts": 0.0,
                 "top_referrers": [],
                 "conversion_rate": "0%"
             },
             
-            # Trade stats
-            "trade": {
+            # Trade API stats
+            "trade_api": {
                 "portfolios": 0,
                 "active_positions": 0,
                 "total_alerts": 0,
-                "active_strategies": 0,
-                "total_swap_volume": 0.0,
-                "top_traders": [],
-                "total_trades": 0
+                "unique_traders": 0,
+                "top_traders": []
+            },
+            
+            # Trade DEX stats
+            "trade_dex": {
+                "pools": 0,
+                "positions": 0,
+                "swaps": 0,
+                "total_volume": 0.0,
+                "users": 0,
+                "top_pairs": []
             },
             
             # Learning stats
             "learning": {
                 "total_courses": 0,
                 "enrolled_users": 0,
+                "active_students": 0,
                 "completed_courses": 0,
-                "total_quizzes": 0,
                 "certificates_issued": 0,
-                "total_rewards_distributed": 0.0,
+                "total_quizzes": 0,
+                "total_rewards": 0.0,
                 "avg_completion_time_days": 0,
                 "top_courses": []
             },
@@ -2073,196 +2084,207 @@ async def bot_details_overview(request: web.Request):
             # DAO stats
             "dao": {
                 "active_proposals": 0,
+                "total_proposals": 0,
                 "total_voters": 0,
+                "total_votes": 0,
+                "delegations": 0,
                 "treasury_balance": 0.0,
-                "total_delegations": 0,
-                "governance_participation": "0%",
-                "voting_history": [],
-                "total_votes": 0
+                "voting_participation": "0%",
+                "recent_votes": []
             },
             
             # Content stats
             "content": {
                 "total_members": 0,
                 "active_topics": 0,
-                "stories_shared": 0,
-                "trending_stories": [],
-                "engagement_rate": "0%"
+                "total_stories": 0
             },
             
             # Support stats
             "support": {
                 "open_tickets": 0,
                 "resolved_tickets": 0,
-                "avg_resolution_time_hours": 0,
-                "satisfaction_rating": 0.0,
-                "priority_tickets": 0
+                "total_tickets": 0,
+                "avg_resolution_hours": 0
+            },
+            
+            # Crossposter stats
+            "crossposter": {
+                "forwarded_posts": 0,
+                "configured_channels": 0,
+                "active_rules": 0
             }
         }
         
-        # Try to fetch data from each bot's specific tables - FILTERED by bot_username
+        # AFFILIATE BOT - aff_referrals, aff_commissions, aff_payouts
         try:
             aff = await fetchrow("""
                 select 
-                    (select count(*) from aff_referrals where bot_username=%s) as total_refs,
-                    (select count(*) from aff_referrals where bot_username=%s and status='converted') as converted,
-                    (select coalesce(sum(commission), 0) from aff_conversions where bot_username=%s) as total_comms,
-                    (select coalesce(sum(amount), 0) from aff_payouts where bot_username=%s and status='pending') as pending_payouts,
-                    (select coalesce(count(distinct referrer_id), 0) from aff_referrals where bot_username=%s) as unique_referrers
-            """, (bot_username, bot_username, bot_username, bot_username, bot_username))
+                    count(*) as total_refs,
+                    count(distinct referrer_id) as unique_refs,
+                    count(case when status='active' then 1 end) as active,
+                    (select coalesce(sum(total_earned), 0) from aff_commissions) as total_earned,
+                    (select coalesce(sum(pending), 0) from aff_commissions) as pending_comm,
+                    (select coalesce(sum(amount), 0) from aff_payouts where status='pending') as pending_payout
+                from aff_referrals
+            """)
             if aff:
-                total_refs = aff.get('total_refs', 0) or 0
-                converted = aff.get('converted', 0) or 0
-                details["affiliate"]["total_referrals"] = total_refs
-                details["affiliate"]["converted_referrals"] = converted
-                details["affiliate"]["total_commissions"] = float(aff.get('total_comms', 0) or 0)
-                details["affiliate"]["pending_payouts"] = float(aff.get('pending_payouts', 0) or 0)
-                if total_refs > 0:
-                    details["affiliate"]["conversion_rate"] = f"{(converted/total_refs*100):.1f}%"
+                details["affiliate"]["total_referrals"] = aff.get('total_refs', 0) or 0
+                details["affiliate"]["unique_referrers"] = aff.get('unique_refs', 0) or 0
+                details["affiliate"]["total_earned"] = float(aff.get('total_earned', 0) or 0)
+                details["affiliate"]["pending_commissions"] = float(aff.get('pending_comm', 0) or 0)
+                details["affiliate"]["pending_payouts"] = float(aff.get('pending_payout', 0) or 0)
+                if (aff.get('total_refs', 0) or 0) > 0:
+                    details["affiliate"]["conversion_rate"] = f"{((aff.get('active', 0) or 0)/(aff.get('total_refs', 0) or 1)*100):.1f}%"
             
-            # Top referrers für diesen Bot
-            try:
-                top_refs = await fetch("""
-                    select referrer_id, count(*) as ref_count, 
-                           (select count(*) from aff_referrals r2 where r2.referrer_id=r.referrer_id and r2.bot_username=%s and r2.status='converted') as converted_count
-                    from aff_referrals r
-                    where r.bot_username=%s
-                    group by referrer_id
-                    order by ref_count desc
-                    limit 5
-                """, (bot_username, bot_username))
-                details["affiliate"]["top_referrers"] = [{"user_id": r['referrer_id'], "referrals": r['ref_count'], "converted": r['converted_count']} for r in top_refs]
-            except:
-                pass
-        except:
-            pass
+            # Top referrers
+            top_refs = await fetch("""
+                select referrer_id, count(*) as ref_count from aff_referrals
+                group by referrer_id order by ref_count desc limit 5
+            """)
+            details["affiliate"]["top_referrers"] = [{"id": r['referrer_id'], "count": r['ref_count']} for r in (top_refs or [])]
+        except Exception as e:
+            log.debug(f"Affiliate stats error: {e}")
         
+        # TRADE API - tradeapi_portfolios, tradeapi_positions, tradeapi_alerts
         try:
             trade = await fetchrow("""
                 select 
-                    (select count(*) from tradeapi_portfolios where bot_username=%s) as portfolios,
-                    (select count(*) from tradeapi_positions where bot_username=%s and status='open') as active_pos,
-                    (select count(*) from tradeapi_alerts where bot_username=%s and is_active=true) as alerts,
-                    (select count(*) from tradedex_strategies where bot_username=%s and status='active') as strategies,
-                    (select coalesce(sum(amount), 0) from tradedex_strategies where bot_username=%s) as swap_vol,
-                    (select count(*) from tradedex_strategies where bot_username=%s) as total_trades,
-                    (select count(distinct user_id) from tradeapi_portfolios where bot_username=%s) as unique_traders
-            """, (bot_username, bot_username, bot_username, bot_username, bot_username, bot_username, bot_username))
+                    (select count(*) from tradeapi_portfolios) as portfolios,
+                    (select count(*) from tradeapi_positions) as positions,
+                    (select count(*) from tradeapi_alerts) as alerts,
+                    (select count(distinct user_id) from tradeapi_portfolios) as users
+                from tradeapi_portfolios limit 1
+            """)
             if trade:
-                details["trade"]["portfolios"] = trade.get('portfolios', 0) or 0
-                details["trade"]["active_positions"] = trade.get('active_pos', 0) or 0
-                details["trade"]["total_alerts"] = trade.get('alerts', 0) or 0
-                details["trade"]["active_strategies"] = trade.get('strategies', 0) or 0
-                details["trade"]["total_swap_volume"] = float(trade.get('swap_vol', 0) or 0)
-                details["trade"]["total_trades"] = trade.get('total_trades', 0) or 0
-            
-            # Top traders für diesen Bot
-            try:
-                top_traders = await fetch("""
-                    select user_id, count(*) as trade_count,
-                           (select coalesce(sum(amount), 0) from tradedex_strategies ts where ts.user_id=tp.user_id and ts.bot_username=%s) as total_volume
-                    from tradeapi_portfolios tp
-                    where tp.bot_username=%s
-                    group by user_id
-                    order by trade_count desc
-                    limit 5
-                """, (bot_username, bot_username))
-                details["trade"]["top_traders"] = [{"user_id": t['user_id'], "trades": t['trade_count'], "volume": float(t['total_volume'] or 0)} for t in top_traders]
-            except:
-                pass
-        except:
-            pass
+                details["trade_api"]["portfolios"] = trade.get('portfolios', 0) or 0
+                details["trade_api"]["active_positions"] = trade.get('positions', 0) or 0
+                details["trade_api"]["total_alerts"] = trade.get('alerts', 0) or 0
+                details["trade_api"]["unique_traders"] = trade.get('users', 0) or 0
+        except Exception as e:
+            log.debug(f"Trade API stats error: {e}")
         
+        # TRADE DEX - tradedex_pools, tradedex_positions, tradedex_swaps
+        try:
+            dex = await fetchrow("""
+                select 
+                    (select count(*) from tradedex_pools) as pools,
+                    (select count(*) from tradedex_positions) as positions,
+                    (select count(*) from tradedex_swaps) as swaps,
+                    (select coalesce(sum(amount_in), 0) from tradedex_swaps) as volume,
+                    (select count(distinct user_id) from tradedex_positions) as users
+                from tradedex_pools limit 1
+            """)
+            if dex:
+                details["trade_dex"]["pools"] = dex.get('pools', 0) or 0
+                details["trade_dex"]["positions"] = dex.get('positions', 0) or 0
+                details["trade_dex"]["swaps"] = dex.get('swaps', 0) or 0
+                details["trade_dex"]["total_volume"] = float(dex.get('volume', 0) or 0)
+                details["trade_dex"]["users"] = dex.get('users', 0) or 0
+        except Exception as e:
+            log.debug(f"Trade DEX stats error: {e}")
+        
+        # LEARNING - learning_courses, learning_enrollments, learning_certificates
         try:
             learn = await fetchrow("""
                 select 
-                    (select count(*) from learning_courses where bot_username=%s) as courses,
-                    (select count(distinct user_id) from learning_enrollments where bot_username=%s) as enrolled,
-                    (select count(*) from learning_progress where bot_username=%s and progress_percent >= 100) as completed,
-                    (select count(*) from learning_quizzes where bot_username=%s) as quizzes,
-                    (select count(*) from learning_certificates where bot_username=%s) as certs,
-                    (select coalesce(sum(points_earned), 0) from learning_progress where bot_username=%s) as total_rewards,
-                    (select extract(epoch from avg(updated_at - created_at))/86400 from learning_progress where bot_username=%s and progress_percent >= 100) as avg_completion_time
-            """, (bot_username, bot_username, bot_username, bot_username, bot_username, bot_username, bot_username))
+                    (select count(*) from learning_courses) as courses,
+                    (select count(distinct user_id) from learning_enrollments) as enrolled,
+                    (select count(distinct user_id) from learning_enrollments where completed_at is null) as active,
+                    (select count(distinct user_id) from learning_enrollments where completed_at is not null) as completed,
+                    (select count(*) from learning_certificates) as certs,
+                    (select count(*) from learning_quizzes) as quizzes,
+                    (select coalesce(sum(points_earned), 0) from learning_rewards) as rewards,
+                    (select extract(epoch from avg(extract(epoch from (completed_at - started_at))))/86400 
+                     from learning_enrollments where completed_at is not null) as avg_days
+                from learning_courses limit 1
+            """)
             if learn:
                 details["learning"]["total_courses"] = learn.get('courses', 0) or 0
                 details["learning"]["enrolled_users"] = learn.get('enrolled', 0) or 0
+                details["learning"]["active_students"] = learn.get('active', 0) or 0
                 details["learning"]["completed_courses"] = learn.get('completed', 0) or 0
-                details["learning"]["total_quizzes"] = learn.get('quizzes', 0) or 0
                 details["learning"]["certificates_issued"] = learn.get('certs', 0) or 0
-                details["learning"]["total_rewards_distributed"] = float(learn.get('total_rewards', 0) or 0)
-                details["learning"]["avg_completion_time_days"] = int(learn.get('avg_completion_time', 0) or 0)
+                details["learning"]["total_quizzes"] = learn.get('quizzes', 0) or 0
+                details["learning"]["total_rewards"] = float(learn.get('rewards', 0) or 0)
+                details["learning"]["avg_completion_time_days"] = int(learn.get('avg_days', 0) or 0)
             
-            # Top courses für diesen Bot
-            try:
-                top_courses = await fetch("""
-                    select c.id, c.title, count(distinct e.user_id) as enrolled_count
-                    from learning_courses c
-                    left join learning_enrollments e on c.id = e.course_id and e.bot_username=%s
-                    where c.bot_username=%s
-                    group by c.id, c.title
-                    order by enrolled_count desc
-                    limit 5
-                """, (bot_username, bot_username))
-                details["learning"]["top_courses"] = [{"course": t['title'], "enrolled": t['enrolled_count']} for t in top_courses]
-            except:
-                pass
-        except:
-            pass
+            # Top courses
+            top_courses = await fetch("""
+                select title, (select count(*) from learning_enrollments where course_id=learning_courses.id) as enroll_count
+                from learning_courses order by enroll_count desc limit 5
+            """)
+            details["learning"]["top_courses"] = [{"name": c['title'], "enrolled": c['enroll_count']} for c in (top_courses or [])]
+        except Exception as e:
+            log.debug(f"Learning stats error: {e}")
         
+        # DAO - dao_proposals, dao_votes, dao_delegations, dao_user_voting_power
         try:
             dao = await fetchrow("""
                 select 
-                    (select count(*) from dao_proposals where bot_username=%s and status='active') as active_prop,
-                    (select count(distinct voter_id) from dao_votes where bot_username=%s) as total_voters,
-                    (select coalesce(sum(amount), 0) from dao_treasury_transactions where bot_username=%s and type='deposit') as treasury,
-                    (select count(*) from dao_delegations where bot_username=%s) as delegations,
-                    (select count(*) from dao_votes where bot_username=%s) as total_votes,
-                    (select count(distinct proposal_id) from dao_votes where bot_username=%s) as proposals_voted_on
-            """, (bot_username, bot_username, bot_username, bot_username, bot_username, bot_username))
+                    (select count(*) from dao_proposals where status='active') as active_prop,
+                    (select count(*) from dao_proposals) as total_prop,
+                    (select count(distinct voter_id) from dao_votes) as voters,
+                    (select count(*) from dao_votes) as total_votes,
+                    (select count(*) from dao_delegations) as delegations,
+                    (select coalesce(sum(emrd_balance), 0) from dao_user_voting_power) as treasury
+                from dao_proposals limit 1
+            """)
             if dao:
-                total_voters = dao.get('total_voters', 0) or 0
+                total_voters = dao.get('voters', 0) or 0
                 total_votes = dao.get('total_votes', 0) or 0
                 details["dao"]["active_proposals"] = dao.get('active_prop', 0) or 0
+                details["dao"]["total_proposals"] = dao.get('total_prop', 0) or 0
                 details["dao"]["total_voters"] = total_voters
-                details["dao"]["treasury_balance"] = float(dao.get('treasury', 0) or 0)
-                details["dao"]["total_delegations"] = dao.get('delegations', 0) or 0
                 details["dao"]["total_votes"] = total_votes
+                details["dao"]["delegations"] = dao.get('delegations', 0) or 0
+                details["dao"]["treasury_balance"] = float(dao.get('treasury', 0) or 0)
                 if total_voters > 0:
-                    details["dao"]["governance_participation"] = f"{(total_votes/total_voters*100):.1f}%"
+                    details["dao"]["voting_participation"] = f"{(total_votes/total_voters*100):.1f}%"
             
-            # Recent voting history
-            try:
-                voting = await fetch("""
-                    select proposal_id, voter_id, vote_weight, created_at
-                    from dao_votes
-                    where bot_username=%s
-                    order by created_at desc
-                    limit 10
-                """, (bot_username,))
-                details["dao"]["voting_history"] = [{"proposal": v['proposal_id'], "weight": float(v['vote_weight'] or 0), "timestamp": v['created_at'].isoformat() if v['created_at'] else None} for v in voting]
-            except:
-                pass
-        except:
-            pass
+            # Recent votes
+            recent = await fetch("""
+                select proposal_id, voter_id, voting_power, timestamp
+                from dao_votes order by timestamp desc limit 5
+            """)
+            details["dao"]["recent_votes"] = [{"proposal": v['proposal_id'], "power": float(v['voting_power'] or 0)} for v in (recent or [])]
+        except Exception as e:
+            log.debug(f"DAO stats error: {e}")
         
+        # SUPPORT - support_tickets, support_users
         try:
             support = await fetchrow("""
                 select 
-                    (select count(*) from support_tickets where bot_username=%s and status='open') as open_tickets,
-                    (select count(*) from support_tickets where bot_username=%s and status='resolved') as resolved,
-                    (select extract(epoch from avg(resolved_at - created_at))/3600 from support_tickets where bot_username=%s and resolved_at is not null) as avg_time,
-                    (select count(*) from support_tickets where bot_username=%s and priority='high') as priority_count,
-                    (select avg(rating) from support_tickets where bot_username=%s and rating is not null) as satisfaction
-            """, (bot_username, bot_username, bot_username, bot_username, bot_username))
+                    (select count(*) from support_tickets where status in ('neu', 'open')) as open_tickets,
+                    (select count(*) from support_tickets where status in ('closed', 'resolved')) as resolved,
+                    (select count(*) from support_tickets) as total_tickets,
+                    (select extract(epoch from avg(closed_at - created_at))/3600 
+                     from support_tickets where closed_at is not null) as avg_hours
+                from support_tickets limit 1
+            """)
             if support:
                 details["support"]["open_tickets"] = support.get('open_tickets', 0) or 0
                 details["support"]["resolved_tickets"] = support.get('resolved', 0) or 0
-                details["support"]["avg_resolution_time_hours"] = int(support.get('avg_time', 0) or 0)
-                details["support"]["priority_tickets"] = support.get('priority_count', 0) or 0
-                details["support"]["satisfaction_rating"] = float(support.get('satisfaction', 0) or 0)
-        except:
-            pass
+                details["support"]["total_tickets"] = support.get('total_tickets', 0) or 0
+                details["support"]["avg_resolution_hours"] = int(support.get('avg_hours', 0) or 0)
+        except Exception as e:
+            log.debug(f"Support stats error: {e}")
+        
+        # CROSSPOSTER - crossposter_posts, crossposter_channels, crossposter_rules
+        try:
+            cross = await fetchrow("""
+                select 
+                    (select count(*) from crossposter_posts) as posts,
+                    (select count(*) from crossposter_channels) as channels,
+                    (select count(*) from crossposter_rules where is_active=true) as rules
+                from crossposter_posts limit 1
+            """)
+            if cross:
+                details["crossposter"]["forwarded_posts"] = cross.get('posts', 0) or 0
+                details["crossposter"]["configured_channels"] = cross.get('channels', 0) or 0
+                details["crossposter"]["active_rules"] = cross.get('rules', 0) or 0
+        except Exception as e:
+            log.debug(f"Crossposter stats error: {e}")
         
         return _json(details, request)
     except Exception as e:
