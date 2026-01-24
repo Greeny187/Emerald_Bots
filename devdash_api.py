@@ -2035,7 +2035,7 @@ async def bot_details_overview(request: web.Request):
             "is_active": bot['is_active'],
             "created_at": bot['created_at'].isoformat() if bot['created_at'] else None,
             "updated_at": bot['updated_at'].isoformat() if bot['updated_at'] else None,
-            "days_running": (datetime.datetime.utcnow() - bot['created_at']).days if bot['created_at'] else 0,
+            "days_running": (datetime.datetime.now(datetime.timezone.utc) - bot['created_at']).days if bot['created_at'] and bot['created_at'].tzinfo else (datetime.datetime.now(datetime.timezone.utc) - bot['created_at'].replace(tzinfo=datetime.timezone.utc)).days if bot['created_at'] else 0,
             
             # Affiliate stats
             "affiliate": {
