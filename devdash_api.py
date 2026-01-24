@@ -1861,6 +1861,74 @@ async def export_ads_report(request):
         "total_ads": len(rows)
     }, request)
 
+# ------------------------------ Analytics Endpoints ----------------------------
+async def bot_activity(request: web.Request):
+    """Bot activity metrics"""
+    await _auth_user(request)
+    try:
+        # Get bot activity from databases
+        bots = await fetch("""
+            select id, username, title, is_active, created_at, updated_at 
+            from dashboard_bots 
+            order by updated_at desc 
+            limit 10
+        """)
+        
+        return _json({
+            "bots": bots or [],
+            "total": len(bots) if bots else 0,
+            "timestamp": int(time.time())
+        }, request)
+    except Exception as e:
+        log.error("bot_activity failed: %s", e)
+        return _json({"bots": [], "total": 0, "timestamp": int(time.time())}, request)
+
+
+async def bot_groups(request: web.Request):
+    """Bot groups (placeholder - can be extended)"""
+    await _auth_user(request)
+    try:
+        bots = await fetch("""
+            select id, username, title, meta 
+            from dashboard_bots 
+            where is_active=true
+            order by id asc
+        """)
+        
+        groups = []
+        for bot in (bots or []):
+            groups.append({
+                "id": bot['id'],
+                "name": bot['username'],
+                "title": bot['title'],
+                "type": "telegram_bot",
+                "status": "active"
+            })
+        
+        return _json({"groups": groups, "total": len(groups)}, request)
+    except Exception as e:
+        log.error("bot_groups failed: %s", e)
+        return _json({"groups": [], "total": 0}, request)
+
+
+async def token_holders(request: web.Request):
+    """Token holder distribution"""
+    await _auth_user(request)
+    limit = int(request.query.get("limit", "10"))
+    try:
+        # Return mock data for now
+        return _json({
+            "holders": [
+                {"address": "UQBVG-RRn7l5QZkfS4yhy8M3yhu-uniUrJc4Uy4Qkom-RFo2", "balance": "1000000000", "percentage": 100.0}
+            ],
+            "total_holders": 1,
+            "timestamp": int(time.time())
+        }, request)
+    except Exception as e:
+        log.error("token_holders failed: %s", e)
+        return _json({"holders": [], "total_holders": 0}, request)
+
+
 # ------------------------------ Monitoring & Real-time Data ----------------------------
 async def monitoring_data(request: web.Request):
     """Real-time monitoring dashboard data"""
@@ -1975,10 +2043,16 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/system/logs",                  system_logs)
     app.router.add_route("GET", "/api/token/emrd",                   token_emrd_info)
     
+    # Analytics Endpoints (under /api prefix)
+    app.router.add_route("GET", "/api/analytics/bot-activity",       bot_activity)
+    app.router.add_route("GET", "/api/bot-groups",                   bot_groups)
+    app.router.add_route("GET", "/api/token/holders",                token_holders)
+    
     # CORS - auch mit /api prefix
     app.router.add_route("OPTIONS", "/api/devdash/{tail:.*}", options_handler)
     app.router.add_route("OPTIONS", "/api/system/{tail:.*}", options_handler)
     app.router.add_route("OPTIONS", "/api/token/{tail:.*}", options_handler)
+    app.router.add_route("OPTIONS", "/api/analytics/{tail:.*}", options_handler)
     
     
         # Advanced Analytics
