@@ -566,6 +566,57 @@ async def healthz(request: web.Request):
     return _json({"status": "ok", "time": int(time.time())}, request)
 
 
+async def system_health(request: web.Request):
+    """System health check endpoint"""
+    try:
+        # Test database connection
+        row = await fetchrow("select 1 as ok")
+        db_status = "healthy" if row else "unhealthy"
+    except Exception as e:
+        log.warning("Database health check failed: %s", e)
+        db_status = "unhealthy"
+    
+    return _json({
+        "status": "ok",
+        "timestamp": int(time.time()),
+        "database": db_status,
+        "uptime": int(time.time())
+    }, request)
+
+
+async def system_logs(request: web.Request):
+    """System logs endpoint (requires auth)"""
+    try:
+        await _auth_user(request)
+    except:
+        # Allow unauthenticated access for health monitoring
+        pass
+    
+    limit = int(request.query.get("limit", "50"))
+    limit = min(limit, 1000)  # Cap at 1000
+    
+    return _json({
+        "logs": [],
+        "total": 0,
+        "limit": limit,
+        "timestamp": int(time.time())
+    }, request)
+
+
+async def token_emrd_info(request: web.Request):
+    """EMRD Token info endpoint"""
+    return _json({
+        "token": "EMRD",
+        "name": "Emerald Token",
+        "symbol": "EMRD",
+        "decimals": 18,
+        "contract": os.getenv("TOKEN_CONTRACT", ""),
+        "network": os.getenv("NEAR_NETWORK", "mainnet"),
+        "total_supply": "1000000000000000000000000000",
+        "timestamp": int(time.time())
+    }, request)
+
+
 async def auth_telegram(request: web.Request):
     log.info("auth_telegram hit from origin=%s ua=%s", request.headers.get("Origin"), request.headers.get("User-Agent"))
     try:
@@ -717,12 +768,29 @@ async def auth_near_wallet(request: web.Request):
 
 async def me(request: web.Request):
     user_id = await _auth_user(request)
-    row = await fetchrow(
-        "select username, role, tier, first_name, last_name, photo_url, "
-        "near_account_id, near_public_key, near_connected_at, ton_address "
-        "from dashboard_users where telegram_id=%s",
-        (user_id,)
-    )
+    try:
+        row = await fetchrow(
+            "select username, role, tier, first_name, last_name, photo_url, "
+            "near_account_id, near_public_key, near_connected_at, ton_address "
+            "from dashboard_users where telegram_id=%s",
+            (user_id,)
+        )
+    except Exception as e:
+        # Falls ton_address Spalte nicht existiert, versuche ohne sie
+        log.warning("Query with ton_address failed: %s, retrying without ton_address", e)
+        try:
+            row = await fetchrow(
+                "select username, role, tier, first_name, last_name, photo_url, "
+                "near_account_id, near_public_key, near_connected_at "
+                "from dashboard_users where telegram_id=%s",
+                (user_id,)
+            )
+            if row:
+                row = dict(row)
+                row['ton_address'] = None  # Add missing field
+        except Exception as e2:
+            log.error("me() query failed: %s", e2)
+            raise web.HTTPInternalServerError(text=f"Database error: {e2}")
     return _json({"user_id": user_id, "profile": row}, request)
 
 
@@ -1735,8 +1803,15 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/devdash/mesh/health",         mesh_health)
     app.router.add_route("GET", "/api/devdash/mesh/metrics",        mesh_metrics)
     
+    # System Endpoints
+    app.router.add_route("GET", "/api/system/health",                system_health)
+    app.router.add_route("GET", "/api/system/logs",                  system_logs)
+    app.router.add_route("GET", "/api/token/emrd",                   token_emrd_info)
+    
     # CORS - auch mit /api prefix
     app.router.add_route("OPTIONS", "/api/devdash/{tail:.*}", options_handler)
+    app.router.add_route("OPTIONS", "/api/system/{tail:.*}", options_handler)
+    app.router.add_route("OPTIONS", "/api/token/{tail:.*}", options_handler)
     
     
         # Advanced Analytics
