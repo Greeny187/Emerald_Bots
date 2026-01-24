@@ -241,7 +241,7 @@ create table if not exists dashboard_bot_endpoints (
 create table if not exists dashboard_ads (
   id serial primary key,
   name text not null,
-  placement text not null check (placement in ('header','sidebar','in-bot','story','inline')),
+  placement text not null check (placement in ('header','sidebar','in-bot','story','inline','banner')),
   content text not null,
   is_active boolean not null default true,
   start_at timestamp,
@@ -1882,14 +1882,10 @@ async def bot_detailed_info(request: web.Request):
     try:
         bots = await fetch("""
             select 
-                db.id, db.username, db.title, db.is_active, db.meta,
-                db.created_at, db.updated_at,
-                count(dbe.id) as endpoint_count,
-                max(dbe.last_seen) as last_health_check
-            from dashboard_bots db
-            left join dashboard_bot_endpoints dbe on db.username = dbe.bot_username
-            group by db.id, db.username, db.title, db.is_active, db.meta, db.created_at, db.updated_at
-            order by db.updated_at desc
+                id, username, title, is_active, meta,
+                created_at, updated_at
+            from dashboard_bots
+            order by updated_at desc
         """)
         
         # Enrich with additional data
@@ -1911,10 +1907,8 @@ async def bot_detailed_info(request: web.Request):
                 'meta': bot['meta'],
                 'created_at': bot['created_at'].isoformat() if bot['created_at'] else None,
                 'updated_at': bot['updated_at'].isoformat() if bot['updated_at'] else None,
-                'endpoint_count': bot['endpoint_count'],
-                'last_health_check': bot['last_health_check'].isoformat() if bot['last_health_check'] else None,
                 'user_count': user_count,
-                'status': 'healthy' if bot['endpoint_count'] > 0 else 'unknown',
+                'status': 'healthy' if bot['is_active'] else 'unknown',
                 'days_running': days_running
             })
         
@@ -1999,6 +1993,177 @@ async def token_holders(request: web.Request):
     except Exception as e:
         log.error("token_holders failed: %s", e)
         return _json({"holders": [], "total_holders": 0}, request)
+
+
+# ------------------------------ Bot-specific Details ----------------------------
+async def bot_details_overview(request: web.Request):
+    """Get comprehensive details for a specific bot from all available sources"""
+    await _auth_user(request)
+    bot_username = request.query.get("bot")
+    if not bot_username:
+        return _json({"error": "bot parameter required"}, request, status=400)
+    
+    try:
+        # Base bot info
+        bot = await fetchrow("select id, username, title, is_active, meta, created_at, updated_at from dashboard_bots where username=%s", (bot_username,))
+        if not bot:
+            return _json({"error": "Bot not found"}, request, status=404)
+        
+        details = {
+            "id": bot['id'],
+            "username": bot['username'],
+            "title": bot['title'],
+            "is_active": bot['is_active'],
+            "created_at": bot['created_at'].isoformat() if bot['created_at'] else None,
+            "updated_at": bot['updated_at'].isoformat() if bot['updated_at'] else None,
+            "days_running": (datetime.datetime.utcnow() - bot['created_at']).days if bot['created_at'] else 0,
+            
+            # Affiliate stats
+            "affiliate": {
+                "total_referrals": 0,
+                "converted_referrals": 0,
+                "total_commissions": 0.0,
+                "pending_payouts": 0.0,
+                "tier": "standard"
+            },
+            
+            # Trade stats
+            "trade": {
+                "portfolios": 0,
+                "active_positions": 0,
+                "total_alerts": 0,
+                "active_strategies": 0,
+                "total_swap_volume": 0.0
+            },
+            
+            # Learning stats
+            "learning": {
+                "total_courses": 0,
+                "enrolled_users": 0,
+                "completed_courses": 0,
+                "total_quizzes": 0,
+                "certificates_issued": 0,
+                "total_rewards_distributed": 0.0
+            },
+            
+            # DAO stats
+            "dao": {
+                "active_proposals": 0,
+                "total_voters": 0,
+                "treasury_balance": 0.0,
+                "total_delegations": 0,
+                "governance_participation": "0%"
+            },
+            
+            # Content stats
+            "content": {
+                "total_members": 0,
+                "active_topics": 0,
+                "stories_shared": 0,
+                "trending_stories": []
+            },
+            
+            # Crossposter stats
+            "crossposter": {
+                "forwarded_posts": 0,
+                "source_channels": 0,
+                "target_channels": 0,
+                "automation_rules": 0
+            },
+            
+            # Support stats
+            "support": {
+                "open_tickets": 0,
+                "resolved_tickets": 0,
+                "avg_resolution_time_hours": 0
+            }
+        }
+        
+        # Try to fetch data from each bot's specific tables
+        try:
+            aff = await fetchrow("""
+                select 
+                    (select count(*) from aff_referrals where referrer_id IN (select telegram_id from dashboard_users)) as total_refs,
+                    (select count(*) from aff_referrals where status='converted') as converted,
+                    (select coalesce(sum(commission), 0) from aff_conversions) as total_comms,
+                    (select coalesce(sum(amount), 0) from aff_payouts where status='pending') as pending_payouts
+            """)
+            if aff:
+                details["affiliate"]["total_referrals"] = aff.get('total_refs', 0) or 0
+                details["affiliate"]["converted_referrals"] = aff.get('converted', 0) or 0
+                details["affiliate"]["total_commissions"] = float(aff.get('total_comms', 0) or 0)
+                details["affiliate"]["pending_payouts"] = float(aff.get('pending_payouts', 0) or 0)
+        except:
+            pass
+        
+        try:
+            trade = await fetchrow("""
+                select 
+                    (select count(*) from tradeapi_portfolios) as portfolios,
+                    (select count(*) from tradeapi_positions where status='open') as active_pos,
+                    (select count(*) from tradeapi_alerts where is_active=true) as alerts,
+                    (select count(*) from tradedex_strategies where status='active') as strategies
+            """)
+            if trade:
+                details["trade"]["portfolios"] = trade.get('portfolios', 0) or 0
+                details["trade"]["active_positions"] = trade.get('active_pos', 0) or 0
+                details["trade"]["total_alerts"] = trade.get('alerts', 0) or 0
+                details["trade"]["active_strategies"] = trade.get('strategies', 0) or 0
+        except:
+            pass
+        
+        try:
+            learn = await fetchrow("""
+                select 
+                    (select count(*) from learning_courses) as courses,
+                    (select count(distinct user_id) from learning_enrollments) as enrolled,
+                    (select count(*) from learning_progress where progress_percent >= 100) as completed,
+                    (select count(*) from learning_quizzes) as quizzes,
+                    (select count(*) from learning_certificates) as certs
+            """)
+            if learn:
+                details["learning"]["total_courses"] = learn.get('courses', 0) or 0
+                details["learning"]["enrolled_users"] = learn.get('enrolled', 0) or 0
+                details["learning"]["completed_courses"] = learn.get('completed', 0) or 0
+                details["learning"]["total_quizzes"] = learn.get('quizzes', 0) or 0
+                details["learning"]["certificates_issued"] = learn.get('certs', 0) or 0
+        except:
+            pass
+        
+        try:
+            dao = await fetchrow("""
+                select 
+                    (select count(*) from dao_proposals where status='active') as active_prop,
+                    (select count(distinct voter_id) from dao_votes) as total_voters,
+                    (select coalesce(sum(amount), 0) from dao_treasury_transactions where type='deposit') as treasury,
+                    (select count(*) from dao_delegations) as delegations
+            """)
+            if dao:
+                details["dao"]["active_proposals"] = dao.get('active_prop', 0) or 0
+                details["dao"]["total_voters"] = dao.get('total_voters', 0) or 0
+                details["dao"]["treasury_balance"] = float(dao.get('treasury', 0) or 0)
+                details["dao"]["total_delegations"] = dao.get('delegations', 0) or 0
+        except:
+            pass
+        
+        try:
+            support = await fetchrow("""
+                select 
+                    (select count(*) from support_tickets where status='open') as open_tickets,
+                    (select count(*) from support_tickets where status='resolved') as resolved,
+                    (select extract(epoch from avg(resolved_at - created_at))/3600 from support_tickets where resolved_at is not null) as avg_time
+            """)
+            if support:
+                details["support"]["open_tickets"] = support.get('open_tickets', 0) or 0
+                details["support"]["resolved_tickets"] = support.get('resolved', 0) or 0
+                details["support"]["avg_resolution_time_hours"] = int(support.get('avg_time', 0) or 0)
+        except:
+            pass
+        
+        return _json(details, request)
+    except Exception as e:
+        log.error("bot_details_overview failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
 
 
 # ------------------------------ Monitoring & Real-time Data ----------------------------
@@ -2118,6 +2283,7 @@ def register_devdash_routes(app: web.Application):
     # Analytics Endpoints (under /api prefix)
     app.router.add_route("GET", "/api/analytics/bot-activity",       bot_activity)
     app.router.add_route("GET", "/api/analytics/bot-detailed",       bot_detailed_info)
+    app.router.add_route("GET", "/api/analytics/bot-details",        bot_details_overview)
     app.router.add_route("GET", "/api/bot-groups",                   bot_groups)
     app.router.add_route("GET", "/api/token/holders",                token_holders)
     

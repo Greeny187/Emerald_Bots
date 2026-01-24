@@ -36,9 +36,9 @@ except Exception:
 
 # Auth: nutze die zentrale WebApp-Auth aus access.py (gleiche Logik wie MiniApp), fallback bleibt erhalten
 try:
-    from .access import parse_webapp_user_id as access_parse_webapp_user_id  # type: ignore
+    from .access import is_admin_or_owner as access_is_admin_or_owner  # type: ignore
 except Exception:  # pragma: no cover
-    access_parse_webapp_user_id = None
+    access_is_admin_or_owner = None
 
 try:
     # Option 2: shared Reward-System (für alle Bots)
@@ -124,13 +124,14 @@ def _resolve_uid(request: web.Request) -> int:
     )
 
     try:
-        # 1) Primär: zentrale Auth (wie in miniapp.py)
-        if access_parse_webapp_user_id:
+        uid = 0
+        # 1) Primär: zentrale Auth (wie in miniapp.py / access.py)
+        if init_str and access_parse_webapp_user_id:
             uid = int(access_parse_webapp_user_id(init_str) or 0)
-        else:
-            # 2) Fallback: lokale Prüfung
-            secrets = _token_secrets_from_request(request)
-            uid = int(parse_webapp_user_id(init_str, secrets=secrets) or 0)
+
+        # 2) Fallback: lokale Prüfung (Signatur gegen bekannte Tokens)
+        if uid <= 0:
+            uid = int(parse_webapp_user_id(request, init_str) or 0)
 
         if uid <= 0:
             logger.warning(
@@ -164,14 +165,29 @@ def _json(request: web.Request, payload: dict, status: int = 200) -> web.Respons
 
 
 async def _is_admin(app, chat_id: int, user_id: int) -> bool:
+    """Admincheck über *alle* bekannten PTB-Apps (wie in miniapp.py)."""
+    apps = []
     try:
-        ptb_app = app.get("ptb_app")
-        if not ptb_app:
-            return False
-        member = await ptb_app.bot.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "creator")
+        apps = list(app.get("_ptb_apps", [])) or []
+        if not apps and "ptb_app" in app:
+            apps = [app["ptb_app"]]
     except Exception:
-        return False
+        apps = []
+
+    for a in apps:
+        try:
+            if access_is_admin_or_owner:
+                is_admin, is_owner = await access_is_admin_or_owner(a.bot, chat_id, user_id)
+                if is_admin or is_owner:
+                    return True
+            else:
+                member = await a.bot.get_chat_member(chat_id, user_id)
+                if getattr(member, "status", "") in ("administrator", "creator"):
+                    return True
+        except Exception as e:
+            logger.debug(f"[story_api] get_chat_member({chat_id},{user_id}) failed: {e}")
+            continue
+    return False
 
 
 def register_story_api(webapp):
