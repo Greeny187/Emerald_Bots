@@ -568,12 +568,23 @@ async def healthz(request: web.Request):
 
 async def system_health(request: web.Request):
     """System health check endpoint"""
+    import psutil
+    import platform
+    
     health = {
         "status": "healthy",
         "timestamp": int(time.time()),
         "version": "1.0.0",
-        "services": {}
+        "system": {
+            "platform": platform.system(),
+            "python_version": platform.python_version()
+        },
+        "services": {},
+        "uptime": int(time.time()),
+        "response_time_ms": 0
     }
+    
+    start_time = time.time()
     
     # Database health
     try:
@@ -597,6 +608,16 @@ async def system_health(request: web.Request):
         health["services"]["users"] = f"{user_count['c'] if user_count else 0} registered"
     except:
         health["services"]["users"] = "unknown"
+    
+    # Ads
+    try:
+        ads_count = await fetchrow("select count(*) as c from dashboard_ads where is_active=true")
+        health["services"]["ads"] = f"{ads_count['c'] if ads_count else 0} active"
+    except:
+        health["services"]["ads"] = "unknown"
+    
+    # Response time
+    health["response_time_ms"] = int((time.time() - start_time) * 1000)
     
     return _json(health, request)
 
@@ -1178,26 +1199,47 @@ async def ads_list(request: web.Request):
 
 async def ads_create(request: web.Request):
     """Erstelle eine neue Werbung"""
-    await _auth_user(request)
-    body = await request.json()
-    name = (body.get("name") or "").strip()
-    placement = (body.get("placement") or "header").strip()
-    content = (body.get("content") or "").strip()
-    is_active = bool(body.get("is_active", True))
-    targeting = body.get("targeting", {})
-    bot_slug = (body.get("bot_slug") or "").strip() or None
-    start_at = body.get("start_at")
-    end_at = body.get("end_at")
-    
-    if not name or not content:
-        return _json({"error": "name und content erforderlich"}, request, status=400)
-    
-    await execute("""
-        insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
-        values (%s, %s, %s, %s, %s::jsonb, %s, to_timestamp(%s), to_timestamp(%s))
-    """, (name, placement, content, is_active, json.dumps(targeting), bot_slug, start_at, end_at))
-    
-    return _json({"ok": True, "name": name}, request, status=201)
+    try:
+        await _auth_user(request)
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        placement = (body.get("placement") or "header").strip()
+        content = (body.get("content") or "").strip()
+        is_active = bool(body.get("is_active", True))
+        targeting = body.get("targeting", {})
+        bot_slug = (body.get("bot_slug") or "").strip() or None
+        start_at = body.get("start_at")
+        end_at = body.get("end_at")
+        
+        if not name or not content:
+            return _json({"error": "name und content erforderlich"}, request, status=400)
+        
+        # Convert timestamps properly, handle None values
+        start_ts = None
+        end_ts = None
+        if start_at:
+            try:
+                start_ts = int(float(start_at))
+            except:
+                start_ts = None
+        if end_at:
+            try:
+                end_ts = int(float(end_at))
+            except:
+                end_ts = None
+        
+        await execute("""
+            insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
+            values (%s, %s, %s, %s, %s::jsonb, %s, 
+                    CASE WHEN %s IS NOT NULL THEN to_timestamp(%s) ELSE NULL END,
+                    CASE WHEN %s IS NOT NULL THEN to_timestamp(%s) ELSE NULL END)
+        """, (name, placement, content, is_active, json.dumps(targeting), bot_slug, 
+              start_ts, start_ts, end_ts, end_ts))
+        
+        return _json({"ok": True, "name": name}, request, status=201)
+    except Exception as e:
+        log.error("ads_create failed: %s", e, exc_info=True)
+        return _json({"error": f"Failed to create ad: {str(e)}"}, request, status=500)
 
 
 async def ads_delete(request: web.Request):
