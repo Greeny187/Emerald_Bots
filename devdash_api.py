@@ -301,6 +301,16 @@ async def ensure_tables():
         );
         """)
         log.info("✅ dashboard_users table ready")
+        
+        # Ensure ton_address column exists (for existing databases)
+        try:
+            await execute("ALTER TABLE dashboard_users ADD COLUMN ton_address TEXT;")
+            log.info("✅ Added ton_address column to dashboard_users")
+        except Exception as e:
+            if "already exists" in str(e) or "duplicate" in str(e).lower():
+                log.info("✅ ton_address column already exists")
+            else:
+                log.warning("⚠️  Could not add ton_address column: %s", e)
 
         # bots (enabled → is_active fix)
         await execute("""
