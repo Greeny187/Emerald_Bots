@@ -34,12 +34,24 @@ except Exception:
     get_pending_rewards = None
     create_reward_claim = None
 
-logger = logging.getLogger(__name__)
+# Auth: nutze die zentrale WebApp-Auth aus access.py (gleiche Logik wie MiniApp), fallback bleibt erhalten
+try:
+    from .access import parse_webapp_user_id as access_parse_webapp_user_id  # type: ignore
+except Exception:  # pragma: no cover
+    access_parse_webapp_user_id = None
 
 try:
+    # Option 2: shared Reward-System (für alle Bots)
     from shared.emrd_rewards_integration import award_points  # type: ignore
-except Exception:  # pragma: no cover
-    award_points = None  # type: ignore
+except Exception:
+    try:
+        # Fallback: falls Module (noch) nicht in shared/ liegt
+        from emrd_rewards_integration import award_points  # type: ignore
+    except Exception:
+        award_points = None
+
+logger = logging.getLogger(__name__)
+
 
 def _token_secrets_from_request(request: web.Request) -> List[bytes]:
     """Sammelt mögliche BOT-Token-Secrets (sha256(token)) aus Env + PTB-App."""
@@ -102,29 +114,35 @@ def parse_webapp_user_id(request: web.Request, init_data: Optional[str]) -> int:
 
 
 def _resolve_uid(request: web.Request) -> int:
+    # Header bevorzugt (kein init_data in URL logs)
     init_str = (
         request.headers.get("X-Telegram-Init-Data")
         or request.headers.get("x-telegram-web-app-data")
+        or request.headers.get("X-Telegram-Web-App-Data")
         or request.query.get("init_data")
+        or ""
     )
-    uid = parse_webapp_user_id(request, init_str)
-    if uid > 0:
+
+    try:
+        # 1) Primär: zentrale Auth (wie in miniapp.py)
+        if access_parse_webapp_user_id:
+            uid = int(access_parse_webapp_user_id(init_str) or 0)
+        else:
+            # 2) Fallback: lokale Prüfung
+            secrets = _token_secrets_from_request(request)
+            uid = int(parse_webapp_user_id(init_str, secrets=secrets) or 0)
+
+        if uid <= 0:
+            logger.warning(
+                "[story_api] auth_failed uid=0 (has_init=%s len=%s origin=%s)",
+                bool(init_str),
+                len(init_str or ""),
+                request.headers.get("Origin") or request.headers.get("Referer") or "",
+            )
         return uid
-
-    # Fallback: uid in der Query (für Browser-Tests)
-    q_uid = request.query.get("uid")
-    if os.getenv("ALLOW_BROWSER_DEV", "0") == "1" and q_uid and str(q_uid).lstrip("-").isdigit():
-        return int(q_uid)
-
-    # Optionaler Dev-Bypass
-    if (
-        os.getenv("ALLOW_BROWSER_DEV") == "1"
-        and request.headers.get("X-Dev-Token") == os.getenv("DEV_TOKEN", "")
-    ):
-        return int(request.headers.get("X-Dev-User-Id", "0") or 0)
-
-    return 0
-
+    except Exception as e:
+        logger.warning("[story_api] auth_failed: %s", e)
+        return 0
 
 def _cors_headers(request: web.Request) -> dict:
     origin = request.headers.get("Origin", "")

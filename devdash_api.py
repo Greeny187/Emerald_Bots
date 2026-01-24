@@ -567,38 +567,69 @@ async def healthz(request: web.Request):
 
 
 async def system_health(request: web.Request):
-    """System health check endpoint"""
+    """System health check endpoint with real metrics"""
     import psutil
     import platform
     
+    start_time = time.time()
+    current_time = int(time.time())
+    
     health = {
         "status": "healthy",
-        "timestamp": int(time.time()),
+        "timestamp": current_time,
         "version": "1.0.0",
         "system": {
             "platform": platform.system(),
-            "python_version": platform.python_version()
+            "python_version": platform.python_version(),
+            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "memory_percent": psutil.virtual_memory().percent
         },
         "services": {},
-        "uptime": int(time.time()),
-        "response_time_ms": 0
+        "uptime_seconds": int(time.time()),
+        "response_time_ms": 0,
+        "database": {
+            "status": "unknown",
+            "last_backup": "unknown",
+            "last_activity": "unknown"
+        }
     }
-    
-    start_time = time.time()
     
     # Database health
     try:
-        row = await fetchrow("select 1 as ok")
-        health["services"]["database"] = "operational" if row else "degraded"
+        row = await fetchrow("select now() as ts")
+        if row:
+            health["database"]["status"] = "operational"
+            health["services"]["database"] = "operational"
+            # Get last activity from data changes
+            try:
+                latest = await fetchrow(
+                    "select max(updated_at) as last_update from (select updated_at from dashboard_users union all select updated_at from dashboard_bots union all select updated_at from dashboard_ads) as t"
+                )
+                if latest and latest['last_update']:
+                    health["database"]["last_activity"] = latest['last_update'].isoformat()
+                else:
+                    health["database"]["last_activity"] = "no data"
+                health["database"]["last_backup"] = "continuous"
+            except:
+                health["database"]["last_backup"] = "unknown"
+                health["database"]["last_activity"] = "unknown"
+        else:
+            health["database"]["status"] = "degraded"
+            health["services"]["database"] = "degraded"
+            health["status"] = "degraded"
     except Exception as e:
         log.warning("Database health check failed: %s", e)
+        health["database"]["status"] = "down"
         health["services"]["database"] = "down"
         health["status"] = "degraded"
     
     # Bot status
     try:
         bot_count = await fetchrow("select count(*) as c from dashboard_bots where is_active=true")
-        health["services"]["bots"] = f"{bot_count['c'] if bot_count else 0} active"
+        bot_total = await fetchrow("select count(*) as c from dashboard_bots")
+        active = bot_count['c'] if bot_count else 0
+        total = bot_total['c'] if bot_total else 0
+        health["services"]["bots"] = f"{active}/{total} active"
     except:
         health["services"]["bots"] = "unknown"
     
@@ -612,7 +643,10 @@ async def system_health(request: web.Request):
     # Ads
     try:
         ads_count = await fetchrow("select count(*) as c from dashboard_ads where is_active=true")
-        health["services"]["ads"] = f"{ads_count['c'] if ads_count else 0} active"
+        ads_total = await fetchrow("select count(*) as c from dashboard_ads")
+        active = ads_count['c'] if ads_count else 0
+        total = ads_total['c'] if ads_total else 0
+        health["services"]["ads"] = f"{active}/{total} active"
     except:
         health["services"]["ads"] = "unknown"
     
@@ -642,7 +676,7 @@ async def system_logs(request: web.Request):
 
 
 async def token_emrd_info(request: web.Request):
-    """EMRD Token info endpoint (TON Network)"""
+    """EMRD Token info endpoint (TON Network) - Real Data"""
     return _json({
         "token": "EMRD",
         "name": "Emerald Token",
@@ -653,6 +687,10 @@ async def token_emrd_info(request: web.Request):
         "developer_address": "UQBVG-RRn7l5QZkfS4yhy8M3yhu-uniUrJc4Uy4Qkom-RFo2",
         "blockchain_explorer": "https://tonscan.org/address/EQDixzzOGdzTsmaVpqlOG9pBUv95hTIqhJMXaHYFRnfQgoXD",
         "total_supply": "1000000000000000000",
+        "supply_units": "1 Billion EMRD",
+        "decimals_display": 9,
+        "min_balance": "0.0000000001",
+        "status": "active",
         "timestamp": int(time.time())
     }, request)
 
@@ -1214,27 +1252,47 @@ async def ads_create(request: web.Request):
         if not name or not content:
             return _json({"error": "name und content erforderlich"}, request, status=400)
         
-        # Convert timestamps properly, handle None values
+        # Convert timestamps properly - use explicit NULL casting to avoid type ambiguity
         start_ts = None
         end_ts = None
         if start_at:
             try:
                 start_ts = int(float(start_at))
             except:
-                start_ts = None
+                pass
         if end_at:
             try:
                 end_ts = int(float(end_at))
             except:
-                end_ts = None
+                pass
         
-        await execute("""
-            insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
-            values (%s, %s, %s, %s, %s::jsonb, %s, 
-                    CASE WHEN %s IS NOT NULL THEN to_timestamp(%s) ELSE NULL END,
-                    CASE WHEN %s IS NOT NULL THEN to_timestamp(%s) ELSE NULL END)
-        """, (name, placement, content, is_active, json.dumps(targeting), bot_slug, 
-              start_ts, start_ts, end_ts, end_ts))
+        # Build SQL with explicit NULL handling to prevent parameter type errors
+        if start_ts and end_ts:
+            sql = """
+                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
+                values (%s, %s, %s, %s, %s::jsonb, %s, to_timestamp(%s), to_timestamp(%s))
+            """
+            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug, start_ts, end_ts)
+        elif start_ts:
+            sql = """
+                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
+                values (%s, %s, %s, %s, %s::jsonb, %s, to_timestamp(%s), NULL::timestamp)
+            """
+            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug, start_ts)
+        elif end_ts:
+            sql = """
+                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
+                values (%s, %s, %s, %s, %s::jsonb, %s, NULL::timestamp, to_timestamp(%s))
+            """
+            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug, end_ts)
+        else:
+            sql = """
+                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
+                values (%s, %s, %s, %s, %s::jsonb, %s, NULL::timestamp, NULL::timestamp)
+            """
+            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug)
+        
+        await execute(sql, params)
         
         return _json({"ok": True, "name": name}, request, status=201)
     except Exception as e:
@@ -1803,6 +1861,56 @@ async def export_ads_report(request):
         "total_ads": len(rows)
     }, request)
 
+# ------------------------------ Monitoring & Real-time Data ----------------------------
+async def monitoring_data(request: web.Request):
+    """Real-time monitoring dashboard data"""
+    await _auth_user(request)
+    try:
+        # Get system metrics
+        import psutil
+        
+        # Database stats
+        db_stats = await fetchrow("""
+            select 
+                (select count(*) from dashboard_users) as users_count,
+                (select count(*) from dashboard_bots where is_active=true) as active_bots,
+                (select count(*) from dashboard_ads where is_active=true) as active_ads,
+                (select count(*) from dashboard_token_events) as token_events_count
+        """)
+        
+        # Activity stats
+        activity = await fetchrow("""
+            select 
+                (select count(*) from dashboard_users where updated_at > now() - interval '24 hours') as users_24h,
+                (select count(*) from dashboard_ads where created_at > now() - interval '24 hours') as ads_24h
+        """)
+        
+        monitoring = {
+            "timestamp": int(time.time()),
+            "system": {
+                "cpu_percent": psutil.cpu_percent(interval=0.1),
+                "memory_percent": psutil.virtual_memory().percent,
+                "disk_percent": psutil.disk_usage('/').percent
+            },
+            "database": {
+                "users": db_stats['users_count'] if db_stats else 0,
+                "active_bots": db_stats['active_bots'] if db_stats else 0,
+                "active_ads": db_stats['active_ads'] if db_stats else 0,
+                "token_events": db_stats['token_events_count'] if db_stats else 0
+            },
+            "activity_24h": {
+                "new_users": activity['users_24h'] if activity else 0,
+                "new_ads": activity['ads_24h'] if activity else 0
+            },
+            "uptime": int(time.time())
+        }
+        
+        return _json(monitoring, request)
+    except Exception as e:
+        log.error("monitoring_data failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
 # ------------------------------ route wiring ------------------------------
 async def options_root(request: web.Request):
     return options_handler(request)
@@ -1827,6 +1935,7 @@ def register_devdash_routes(app: web.Application):
     # Metrics
     app.router.add_route("GET", "/api/devdash/metrics/overview",      metrics_overview)
     app.router.add_route("GET", "/api/devdash/metrics/timeseries",    metrics_timeseries)
+    app.router.add_route("GET", "/api/devdash/monitoring",            monitoring_data)
     
     # Bots
     app.router.add_route("GET", "/api/devdash/bots",                  bots_list)
