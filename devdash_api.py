@@ -1,6 +1,6 @@
-import os, time, json, logging, hmac, hashlib, base64, struct, asyncio, datetime, sys, pathlib, secrets
+import os, time, json, logging, hmac, hashlib, base64, asyncio, datetime, sys, pathlib, secrets
 sys.path.append(str(pathlib.Path(__file__).parent))  # lokales Modulverzeichnis sicherstellen
-import re, httpx
+import httpx
 from typing import Tuple, Dict, Any, List, Optional
 from aiohttp import web
 from psycopg_pool import ConnectionPool
@@ -13,9 +13,6 @@ try:
 except Exception:  # optional; we only raise if verify is actually used
     VerifyKey = None
     BadSignatureError = Exception
-from datetime import datetime, timedelta
-from decimal import Decimal
-import json
 
 getcontext().prec = 50
 
@@ -83,6 +80,12 @@ def _allow_origin(origin: Optional[str]) -> str:
 
 # -------- Dev-Login (Code+Telegram-ID) für dich, liefert JWT --------
 async def dev_login(request: web.Request):
+    """
+    DEV LOGIN - Quick authentication for development/testing.
+    
+    Request: { "telegram_id": 123456, "code": "DEV_LOGIN_CODE", "username": "optional" }
+    Response: { "access_token": "jwt", "token_type": "bearer" }
+    """
     body = await request.json()
     code = (body.get("code") or "").strip()
     tg_id = int(body.get("telegram_id") or 0)
@@ -91,15 +94,20 @@ async def dev_login(request: web.Request):
     expected = os.getenv("DEV_LOGIN_CODE", "")
     if not expected or code != expected:
         raise web.HTTPUnauthorized(text="bad dev code")
+    
+    log.info(f"DEV_LOGIN for telegram_id={tg_id}")
+    
     await execute("""
       insert into dashboard_users(telegram_id, username, role, tier)
       values (%s, %s, 'dev', 'pro')
       on conflict (telegram_id) do update set
         username=coalesce(excluded.username, dashboard_users.username),
+        role='dev',
+        tier='pro',
         updated_at=now()
     """, (tg_id, body.get("username")))
     tok = _jwt_issue(tg_id, role="dev", tier="pro")
-    return _json({"access_token": tok, "token_type": "bearer"}, request)
+    return _json({"access_token": tok, "token_type": "bearer", "role": "dev", "tier": "pro"}, request)
 
 def _cors_headers(request: web.Request) -> Dict[str, str]:
     origin = request.headers.get("Origin")
@@ -431,18 +439,54 @@ def _jwt_verify(token: str) -> int:
 # ----------------------- Telegram login verify -----------------------
 
 def verify_telegram_auth(auth: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Verify Telegram Web App init data signature.
+    
+    Expected fields:
+    - id (int): User ID
+    - auth_date (int): Unix timestamp
+    - hash (str): HMAC-SHA256 signature
+    - username, first_name, last_name, photo_url (optional)
+    """
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN/BOT1_TOKEN env fehlt")
-    for r in ["id", "auth_date", "hash"]:
+    
+    required = ["id", "auth_date", "hash"]
+    for r in required:
         if r not in auth:
-            raise ValueError(f"missing {r}")
+            raise ValueError(f"missing required field: {r}")
+    
+    # Extract hash
+    received_hash = auth["hash"]
+    
+    # Build data check string: alphabetically sorted fields (excluding hash)
+    # Format: "field1=value1\nfield2=value2\n..."
+    data_to_check = {}
+    for k, v in auth.items():
+        if k != "hash":
+            data_to_check[k] = str(v)
+    
+    data_check_str = "\n".join(f"{k}={data_to_check[k]}" for k in sorted(data_to_check.keys()))
+    log.debug(f"Data to check:\n{data_check_str}")
+    
+    # Calculate HMAC
     secret = hashlib.sha256(BOT_TOKEN.encode()).digest()
-    data_check = "\n".join(f"{k}={auth[k]}" for k in sorted([k for k in auth if k != "hash"]))
-    calc = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
-    if calc != auth["hash"]:
-        raise ValueError("bad hash")
-    if time.time() - int(auth["auth_date"]) > int(os.getenv("TELEGRAM_LOGIN_TTL_SECONDS", "86400")):
-        raise ValueError("login expired")
+    calculated_hash = hmac.new(secret, data_check_str.encode(), hashlib.sha256).hexdigest()
+    
+    log.debug(f"Received hash: {received_hash}")
+    log.debug(f"Calculated hash: {calculated_hash}")
+    
+    if calculated_hash != received_hash:
+        raise ValueError(f"invalid hash signature (received={received_hash[:8]}..., calculated={calculated_hash[:8]}...)")
+    
+    # Check timestamp
+    auth_timestamp = int(auth["auth_date"])
+    ttl = int(os.getenv("TELEGRAM_LOGIN_TTL_SECONDS", "86400"))
+    current_time = time.time()
+    
+    if current_time - auth_timestamp > ttl:
+        raise ValueError(f"login expired (auth_date={auth_timestamp}, now={current_time}, ttl={ttl})")
+    
     return {
         "id": int(auth["id"]),
         "username": auth.get("username"),
@@ -570,6 +614,95 @@ async def auth_telegram(request: web.Request):
     except Exception as e:
         log.error("Failed to issue token: %s", e)
         return _json({"error": f"Token error: {str(e)}"}, request, status=500)
+
+
+async def auth_ton_wallet(request: web.Request):
+    """
+    TON WALLET LOGIN - Alternative authentication via TON wallet.
+    
+    Request: { "ton_address": "UQAb...", "signature": "...", "message": "..." }
+    Response: { "access_token": "jwt", "token_type": "bearer" }
+    """
+    log.info("auth_ton_wallet hit")
+    try:
+        body = await request.json()
+        ton_address = (body.get("ton_address") or "").strip()
+        
+        if not ton_address:
+            return _json({"error": "ton_address required"}, request, status=400)
+        
+        # For now: simple mapping (in production: verify signature)
+        # Generate a synthetic telegram_id from TON address hash
+        synthetic_id = int.from_bytes(
+            hashlib.sha256(ton_address.encode()).digest()[:8],
+            byteorder='big'
+        ) % (2**53)
+        
+        log.info(f"TON login for address={ton_address[:20]}..., synthetic_id={synthetic_id}")
+        
+        await execute("""
+            insert into dashboard_users(telegram_id, ton_address, role, tier)
+            values(%s, %s, 'user', 'pro')
+            on conflict(telegram_id) do update set
+              ton_address=excluded.ton_address,
+              updated_at=now()
+        """, (synthetic_id, ton_address))
+        
+        token = _jwt_issue(synthetic_id, role="user", tier="pro")
+        return _json({
+            "access_token": token,
+            "token_type": "bearer",
+            "role": "user",
+            "tier": "pro",
+            "method": "ton_wallet"
+        }, request)
+    except Exception as e:
+        log.error("TON wallet auth failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=400)
+
+
+async def auth_near_wallet(request: web.Request):
+    """
+    NEAR WALLET LOGIN - Alternative authentication via NEAR wallet.
+    
+    Request: { "near_account_id": "user.near", "public_key": "...", "signature": "..." }
+    Response: { "access_token": "jwt", "token_type": "bearer" }
+    """
+    log.info("auth_near_wallet hit")
+    try:
+        body = await request.json()
+        near_account_id = (body.get("near_account_id") or "").strip()
+        
+        if not near_account_id:
+            return _json({"error": "near_account_id required"}, request, status=400)
+        
+        # Generate a synthetic telegram_id from NEAR account hash
+        synthetic_id = int.from_bytes(
+            hashlib.sha256(near_account_id.encode()).digest()[:8],
+            byteorder='big'
+        ) % (2**53)
+        
+        log.info(f"NEAR login for account={near_account_id}, synthetic_id={synthetic_id}")
+        
+        await execute("""
+            insert into dashboard_users(telegram_id, near_account_id, role, tier)
+            values(%s, %s, 'user', 'pro')
+            on conflict(telegram_id) do update set
+              near_account_id=excluded.near_account_id,
+              updated_at=now()
+        """, (synthetic_id, near_account_id))
+        
+        token = _jwt_issue(synthetic_id, role="user", tier="pro")
+        return _json({
+            "access_token": token,
+            "token_type": "bearer",
+            "role": "user",
+            "tier": "pro",
+            "method": "near_wallet"
+        }, request)
+    except Exception as e:
+        log.error("NEAR wallet auth failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=400)
 
 
 async def me(request: web.Request):
@@ -1550,6 +1683,8 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET",  "/devdash/auth/check",           auth_check)
     app.router.add_post(        "/devdash/dev-login",             dev_login)
     app.router.add_post(        "/devdash/auth/telegram",         auth_telegram)
+    app.router.add_post(        "/devdash/auth/ton-wallet",       auth_ton_wallet)
+    app.router.add_post(        "/devdash/auth/near-wallet",      auth_near_wallet)
     app.router.add_route("GET", "/devdash/me",                    me)
     
     # Metrics
