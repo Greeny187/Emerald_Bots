@@ -568,20 +568,37 @@ async def healthz(request: web.Request):
 
 async def system_health(request: web.Request):
     """System health check endpoint"""
+    health = {
+        "status": "healthy",
+        "timestamp": int(time.time()),
+        "version": "1.0.0",
+        "services": {}
+    }
+    
+    # Database health
     try:
-        # Test database connection
         row = await fetchrow("select 1 as ok")
-        db_status = "healthy" if row else "unhealthy"
+        health["services"]["database"] = "operational" if row else "degraded"
     except Exception as e:
         log.warning("Database health check failed: %s", e)
-        db_status = "unhealthy"
+        health["services"]["database"] = "down"
+        health["status"] = "degraded"
     
-    return _json({
-        "status": "ok",
-        "timestamp": int(time.time()),
-        "database": db_status,
-        "uptime": int(time.time())
-    }, request)
+    # Bot status
+    try:
+        bot_count = await fetchrow("select count(*) as c from dashboard_bots where is_active=true")
+        health["services"]["bots"] = f"{bot_count['c'] if bot_count else 0} active"
+    except:
+        health["services"]["bots"] = "unknown"
+    
+    # Users
+    try:
+        user_count = await fetchrow("select count(*) as c from dashboard_users")
+        health["services"]["users"] = f"{user_count['c'] if user_count else 0} registered"
+    except:
+        health["services"]["users"] = "unknown"
+    
+    return _json(health, request)
 
 
 async def system_logs(request: web.Request):
@@ -604,15 +621,17 @@ async def system_logs(request: web.Request):
 
 
 async def token_emrd_info(request: web.Request):
-    """EMRD Token info endpoint"""
+    """EMRD Token info endpoint (TON Network)"""
     return _json({
         "token": "EMRD",
         "name": "Emerald Token",
         "symbol": "EMRD",
-        "decimals": 18,
-        "contract": os.getenv("TOKEN_CONTRACT", ""),
-        "network": os.getenv("NEAR_NETWORK", "mainnet"),
-        "total_supply": "1000000000000000000000000000",
+        "decimals": 9,
+        "contract": "EQDixzzOGdzTsmaVpqlOG9pBUv95hTIqhJMXaHYFRnfQgoXD",
+        "network": "TON",
+        "developer_address": "UQBVG-RRn7l5QZkfS4yhy8M3yhu-uniUrJc4Uy4Qkom-RFo2",
+        "blockchain_explorer": "https://tonscan.org/address/EQDixzzOGdzTsmaVpqlOG9pBUv95hTIqhJMXaHYFRnfQgoXD",
+        "total_supply": "1000000000000000000",
         "timestamp": int(time.time())
     }, request)
 
@@ -769,28 +788,27 @@ async def auth_near_wallet(request: web.Request):
 async def me(request: web.Request):
     user_id = await _auth_user(request)
     try:
+        # Only select columns that definitely exist
         row = await fetchrow(
-            "select username, role, tier, first_name, last_name, photo_url, "
-            "near_account_id, near_public_key, near_connected_at, ton_address "
+            "select username, role, tier, first_name, last_name, photo_url "
             "from dashboard_users where telegram_id=%s",
             (user_id,)
         )
+        if row:
+            row = dict(row)
+            # Try to add optional TON address if column exists
+            try:
+                ton_row = await fetchrow(
+                    "select ton_address from dashboard_users where telegram_id=%s",
+                    (user_id,)
+                )
+                if ton_row:
+                    row['ton_address'] = ton_row.get('ton_address')
+            except:
+                row['ton_address'] = None
     except Exception as e:
-        # Falls ton_address Spalte nicht existiert, versuche ohne sie
-        log.warning("Query with ton_address failed: %s, retrying without ton_address", e)
-        try:
-            row = await fetchrow(
-                "select username, role, tier, first_name, last_name, photo_url, "
-                "near_account_id, near_public_key, near_connected_at "
-                "from dashboard_users where telegram_id=%s",
-                (user_id,)
-            )
-            if row:
-                row = dict(row)
-                row['ton_address'] = None  # Add missing field
-        except Exception as e2:
-            log.error("me() query failed: %s", e2)
-            raise web.HTTPInternalServerError(text=f"Database error: {e2}")
+        log.error("me() query failed: %s", e)
+        raise web.HTTPInternalServerError(text=f"Database error: {e}")
     return _json({"user_id": user_id, "profile": row}, request)
 
 
@@ -1349,8 +1367,6 @@ async def user_list(request: web.Request):
             photo_url,
             role,
             tier,
-            near_account_id,
-            ton_address,
             created_at,
             updated_at
         from dashboard_users
