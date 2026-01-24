@@ -34,11 +34,16 @@ except Exception:
     get_pending_rewards = None
     create_reward_claim = None
 
-# Auth: nutze die zentrale WebApp-Auth aus access.py (gleiche Logik wie MiniApp), fallback bleibt erhalten
+# Auth: zentrale WebApp-Auth aus access.py (optional), fallback bleibt lokal
 try:
     from .access import is_admin_or_owner as access_is_admin_or_owner  # type: ignore
 except Exception:  # pragma: no cover
     access_is_admin_or_owner = None
+
+try:
+    from .access import parse_webapp_user_id as access_parse_webapp_user_id  # type: ignore
+except Exception:  # pragma: no cover
+    access_parse_webapp_user_id = None
 
 try:
     # Option 2: shared Reward-System (für alle Bots)
@@ -127,7 +132,12 @@ def _resolve_uid(request: web.Request) -> int:
         uid = 0
         # 1) Primär: zentrale Auth (wie in miniapp.py / access.py)
         if init_str and access_parse_webapp_user_id:
-            uid = int(access_parse_webapp_user_id(init_str) or 0)
+            try:
+                # manche Implementationen: parse_webapp_user_id(init_str)
+                uid = int(access_parse_webapp_user_id(init_str) or 0)
+            except TypeError:
+                # andere Implementationen: parse_webapp_user_id(request, init_str)
+                uid = int(access_parse_webapp_user_id(request, init_str) or 0)
 
         # 2) Fallback: lokale Prüfung (Signatur gegen bekannte Tokens)
         if uid <= 0:
