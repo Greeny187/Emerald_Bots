@@ -186,7 +186,6 @@ Die Miniapp ist in Tabs (Pills) unterteilt:
   – ℹ️ Info-Text: Nutzer können via /buypro upgraden.
 • Blockchain-Zahlungen:
   – TON Wallet aktivieren & Adresse hinterlegen
-  – NEAR Protocol (falls genutzt) aktivieren & Adresse hinterlegen
   – Optional: Coinbase Pay Key
   – Optional: ByBit Pay Key
 • Klassische Zahlungen:
