@@ -2092,30 +2092,32 @@ async def content_bot_stats_overview(request: web.Request):
         
         r = rows[0] if rows else {}
         
+        total_groups = int(r.get('total_groups') or 0)
+        
         stats = {
             "timestamp": int(time.time()),
             "groups": {
-                "total": int(r[0] or 0),
-                "active_today": int(r[1] or 0),
-                "total_members": int(r[2] or 0)
+                "total": total_groups,
+                "active_today": int(r.get('active_today') or 0),
+                "total_members": int(r.get('total_members') or 0)
             },
             "messages": {
-                "total_today": int(r[3] or 0),
-                "total_this_week": int(r[4] or 0),
-                "average_per_group": round(float(r[4] or 0) / max(1, int(r[0] or 1)), 2)
+                "total_today": int(r.get('messages_today') or 0),
+                "total_this_week": int(r.get('messages_week') or 0),
+                "average_per_group": round(float(r.get('messages_week') or 0) / max(1, total_groups), 2)
             },
             "tokens": {
-                "total_rewards_pending": float(r[5] or 0),
-                "total_pending_claims": int(r[6] or 0),
-                "total_claimants": int(r[7] or 0)
+                "total_rewards_pending": float(r.get('total_rewards_pending') or 0),
+                "total_pending_claims": int(r.get('pending_claims') or 0),
+                "total_claimants": int(r.get('claimants_count') or 0)
             },
             "ai_moderation": {
-                "enabled_in_groups": int(r[8] or 0),
-                "actions_today": int(r[9] or 0),
+                "enabled_in_groups": int(r.get('ai_enabled_groups') or 0),
+                "actions_today": int(r.get('ai_actions_today') or 0),
                 "categories": {}
             },
             "features": {
-                "rss_feeds_active": int(r[10] or 0)
+                "rss_feeds_active": int(r.get('rss_feeds_active') or 0)
             }
         }
         
@@ -2127,7 +2129,7 @@ async def content_bot_stats_overview(request: web.Request):
             GROUP BY category
             ORDER BY count DESC
         """)
-        stats["ai_moderation"]["categories"] = {row[0]: row[1] for row in (ai_cats or [])}
+        stats["ai_moderation"]["categories"] = {row['category']: row['count'] for row in (ai_cats or [])}
         
         return _json(stats, request)
     except Exception as e:
@@ -2163,13 +2165,13 @@ async def content_bot_groups_stats(request: web.Request):
             "timestamp": int(time.time()),
             "groups": [
                 {
-                    "chat_id": int(g[0]),
-                    "title": g[1],
-                    "members": int(g[2] or 0),
-                    "messages_today": int(g[4] or 0),
-                    "messages_week": int(g[5] or 0),
-                    "messages_total": int(g[3] or 0),
-                    "last_activity": g[6].isoformat() if g[6] else None
+                    "chat_id": int(g['chat_id']),
+                    "title": g['title'],
+                    "members": int(g['member_count'] or 0),
+                    "messages_today": int(g['messages_today'] or 0),
+                    "messages_week": int(g['messages_week'] or 0),
+                    "messages_total": int(g['messages_total'] or 0),
+                    "last_activity": g['last_activity'].isoformat() if g['last_activity'] else None
                 }
                 for g in (groups or [])
             ]
@@ -2193,14 +2195,14 @@ async def content_bot_tokens_stats(request: web.Request):
                 (SELECT COALESCE(SUM(amount), 0)::numeric FROM rewards_claims WHERE status='pending') as pending_amount,
                 (SELECT COUNT(DISTINCT user_id) FROM rewards_pending WHERE points > 0) as holders_count
         """)
-        token_row = token_data[0] if token_data else (0, 0, 0, 0)
+        token_row = token_data[0] if token_data else {'total_pending': 0, 'total_claimed': 0, 'pending_amount': 0, 'holders_count': 0}
         
         # Top token holders
         holders = await fetch("""
             SELECT 
                 user_id,
                 points as balance,
-                ROUND(100.0 * points / NULLIF((SELECT SUM(points) FROM rewards_pending WHERE points > 0), 0), 2) as percentage
+                ROUND((100.0 * points / NULLIF((SELECT SUM(points) FROM rewards_pending WHERE points > 0), 0))::numeric, 2) as percentage
             FROM rewards_pending
             WHERE points > 0
             ORDER BY points DESC
@@ -2210,16 +2212,16 @@ async def content_bot_tokens_stats(request: web.Request):
         stats = {
             "timestamp": int(time.time()),
             "EMRD": {
-                "total_distributed": float(token_row[0] or 0),
-                "total_claimed": float(token_row[1] or 0),
-                "total_pending": float(token_row[2] or 0),
-                "holders_count": int(token_row[3] or 0),
+                "total_distributed": float(token_row.get('total_pending') or 0),
+                "total_claimed": float(token_row.get('total_claimed') or 0),
+                "total_pending": float(token_row.get('pending_amount') or 0),
+                "holders_count": int(token_row.get('holders_count') or 0),
                 "top_holders": [
                     {
                         "rank": i+1,
-                        "user_id": int(h[0]),
-                        "balance": float(h[1] or 0),
-                        "percentage": float(h[2] or 0)
+                        "user_id": int(h['user_id']),
+                        "balance": float(h['balance'] or 0),
+                        "percentage": float(h['percentage'] or 0)
                     }
                     for i, h in enumerate(holders or [])
                 ]
@@ -2244,7 +2246,7 @@ async def content_bot_ai_moderation_stats(request: web.Request):
                 (SELECT COUNT(*) FROM ai_mod_logs WHERE ts > now() - interval '7 days') as actions_week,
                 (SELECT COUNT(*) FROM user_strike_events WHERE ts > now() - interval '24 hours') as strikes_today
         """)
-        ai_row = ai_data[0] if ai_data else (0, 0, 0, 0)
+        ai_row = ai_data[0] if ai_data else {'enabled_groups': 0, 'actions_today': 0, 'actions_week': 0, 'strikes_today': 0}
         
         # Actions by category
         by_category = await fetch("""
@@ -2253,7 +2255,7 @@ async def content_bot_ai_moderation_stats(request: web.Request):
                 COUNT(*) as count,
                 COUNT(CASE WHEN action='delete' THEN 1 END) as deleted,
                 COUNT(CASE WHEN action='warn' THEN 1 END) as warned,
-                ROUND(AVG(score), 3) as avg_score
+                ROUND(AVG(score)::numeric, 3) as avg_score
             FROM ai_mod_logs
             WHERE ts > now() - interval '7 days'
             GROUP BY category
@@ -2278,28 +2280,28 @@ async def content_bot_ai_moderation_stats(request: web.Request):
         stats = {
             "timestamp": int(time.time()),
             "actions": {
-                "enabled_groups": int(ai_row[0] or 0),
-                "actions_today": int(ai_row[1] or 0),
-                "actions_week": int(ai_row[2] or 0),
-                "strikes_today": int(ai_row[3] or 0)
+                "enabled_groups": int(ai_row.get('enabled_groups') or 0),
+                "actions_today": int(ai_row.get('actions_today') or 0),
+                "actions_week": int(ai_row.get('actions_week') or 0),
+                "strikes_today": int(ai_row.get('strikes_today') or 0)
             },
             "by_category": [
                 {
-                    "category": c[0],
-                    "count": int(c[1]),
-                    "deleted": int(c[2] or 0),
-                    "warned": int(c[3] or 0),
-                    "avg_score": float(c[4] or 0)
+                    "category": c['category'],
+                    "count": int(c['count']),
+                    "deleted": int(c['deleted'] or 0),
+                    "warned": int(c['warned'] or 0),
+                    "avg_score": float(c['avg_score'] or 0)
                 }
                 for c in (by_category or [])
             ],
             "top_offenders": [
                 {
-                    "user_id": int(o[0]),
-                    "chat_id": int(o[1]),
-                    "violations": int(o[2]),
-                    "deleted_messages": int(o[3] or 0),
-                    "last_violation": o[4].isoformat() if o[4] else None
+                    "user_id": int(o['user_id']),
+                    "chat_id": int(o['chat_id']),
+                    "violations": int(o['violation_count']),
+                    "deleted_messages": int(o['deleted_count'] or 0),
+                    "last_violation": o['last_violation'].isoformat() if o['last_violation'] else None
                 }
                 for o in (offenders or [])
             ]
@@ -2312,41 +2314,26 @@ async def content_bot_ai_moderation_stats(request: web.Request):
 
 
 async def content_bot_features_stats(request: web.Request):
-    """Feature-Nutzung: Story Sharing, Affiliate, RSS, etc."""
+    """Feature-Nutzung: RSS und andere Features"""
     await _auth_user(request)
     try:
-        # Story Sharing Stats (wenn vorhanden)
-        story_data = await fetch("""
-            SELECT
-                COUNT(DISTINCT chat_id) as enabled_groups,
-                COUNT(*) as total_shares,
-                COALESCE(SUM(clicks), 0) as total_clicks,
-                CASE WHEN COUNT(*) > 0 THEN ROUND(AVG(clicks), 2) ELSE 0 END as avg_clicks_per_share
-            FROM story_sharing
-        """)
-        
         # RSS Stats
         rss_data = await fetch("""
             SELECT
-                COUNT(DISTINCT chat_id) as active_feeds
+                COUNT(DISTINCT chat_id) as active_feeds,
+                COUNT(*) as total_feeds
             FROM rss_feeds
             WHERE enabled=true
         """)
         
-        story_row = story_data[0] if story_data else (0, 0, 0, 0)
-        rss_row = rss_data[0] if rss_data else (0,)
+        rss_row = rss_data[0] if rss_data else {'active_feeds': 0, 'total_feeds': 0}
         
         stats = {
             "timestamp": int(time.time()),
             "features": {
-                "story_sharing": {
-                    "enabled_groups": int(story_row[0] or 0),
-                    "total_shares": int(story_row[1] or 0),
-                    "total_clicks": int(story_row[2] or 0),
-                    "avg_clicks_per_share": float(story_row[3] or 0)
-                },
                 "rss": {
-                    "active_feeds": int(rss_row[0] or 0)
+                    "active_feeds": int(rss_row.get('active_feeds') or 0),
+                    "total_feeds": int(rss_row.get('total_feeds') or 0)
                 }
             }
         }
@@ -2368,12 +2355,12 @@ async def content_bot_user_retention(request: web.Request):
             WHERE is_deleted = FALSE
         """)
         
-        # Active today/week/month
+        # Active today/week/month (using CASE WHEN instead of FILTER)
         active_counts = await fetch("""
             SELECT
-                COUNT(DISTINCT user_id) FILTER (WHERE timestamp > NOW() - INTERVAL '1 day') as today,
-                COUNT(DISTINCT user_id) FILTER (WHERE timestamp > NOW() - INTERVAL '7 days') as week,
-                COUNT(DISTINCT user_id) FILTER (WHERE timestamp > NOW() - INTERVAL '30 days') as month
+                COUNT(DISTINCT CASE WHEN timestamp > NOW() - INTERVAL '1 day' THEN user_id END) as today,
+                COUNT(DISTINCT CASE WHEN timestamp > NOW() - INTERVAL '7 days' THEN user_id END) as week,
+                COUNT(DISTINCT CASE WHEN timestamp > NOW() - INTERVAL '30 days' THEN user_id END) as month
             FROM message_logs
         """)
         
@@ -2393,30 +2380,29 @@ async def content_bot_user_retention(request: web.Request):
             SELECT
                 COUNT(*) as total_messages,
                 COUNT(DISTINCT user_id) as unique_users,
-                CASE WHEN COUNT(DISTINCT user_id) > 0 THEN ROUND(CAST(COUNT(*) AS FLOAT) / COUNT(DISTINCT user_id), 2) ELSE 0 END as messages_per_user
+                CASE WHEN COUNT(DISTINCT user_id) > 0 THEN ROUND((CAST(COUNT(*) AS numeric) / COUNT(DISTINCT user_id)), 2) ELSE 0 END as messages_per_user
             FROM message_logs
             WHERE timestamp > NOW() - INTERVAL '30 days'
         """)
         
-        active_c = active_counts[0] if active_counts else (0, 0, 0)
-        engagement_row = engagement[0] if engagement else (0, 0, 0)
-        
-        total = total_users[0][0] if total_users else 0
+        active_c = active_counts[0] if active_counts else {'today': 0, 'week': 0, 'month': 0}
+        engagement_row = engagement[0] if engagement else {'total_messages': 0, 'unique_users': 0, 'messages_per_user': 0}
+        total_row = total_users[0] if total_users else {'total': 0}
         
         stats = {
             "timestamp": int(time.time()),
             "retention": {
-                "active_users_total": int(total),
-                "active_today": int(active_c[0] or 0),
-                "active_week": int(active_c[1] or 0),
-                "active_month": int(active_c[2] or 0)
+                "active_users_total": int(total_row.get('total') or 0),
+                "active_today": int(active_c.get('today') or 0),
+                "active_week": int(active_c.get('week') or 0),
+                "active_month": int(active_c.get('month') or 0)
             },
             "engagement": {
-                "total_messages": int(engagement_row[0] or 0),
-                "unique_users": int(engagement_row[1] or 0),
-                "messages_per_user": float(engagement_row[2] or 0),
+                "total_messages": int(engagement_row.get('total_messages') or 0),
+                "unique_users": int(engagement_row.get('unique_users') or 0),
+                "messages_per_user": float(engagement_row.get('messages_per_user') or 0),
                 "daily_active_users": [
-                    {"date": d[0].isoformat() if d[0] else None, "count": int(d[1])}
+                    {"date": d['date'].isoformat() if d['date'] else None, "count": int(d['active_count'])}
                     for d in (daily_active or [])
                 ]
             }
@@ -2432,24 +2418,24 @@ async def content_bot_network_analysis(request: web.Request):
     """Netzwerkanalyse: Gruppen und Nachrichten"""
     await _auth_user(request)
     try:
-        # Group and message statistics
+        # Group and message statistics (using CASE WHEN instead of FILTER)
         bot_stats = await fetch("""
             SELECT
                 COUNT(DISTINCT chat_id) as total_groups,
                 COUNT(DISTINCT user_id) as total_users,
                 COUNT(*) as total_messages,
-                COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 day') as messages_today,
-                COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '7 days') as messages_week
+                COUNT(CASE WHEN timestamp > NOW() - INTERVAL '1 day' THEN 1 END) as messages_today,
+                COUNT(CASE WHEN timestamp > NOW() - INTERVAL '7 days' THEN 1 END) as messages_week
             FROM message_logs
         """)
         
         # Member events (joins/leaves)
         member_stats = await fetch("""
             SELECT
-                COUNT(*) FILTER (WHERE event_type = 'join' AND ts > NOW() - INTERVAL '1 day') as joins_today,
-                COUNT(*) FILTER (WHERE event_type = 'leave' AND ts > NOW() - INTERVAL '1 day') as leaves_today,
-                COUNT(*) FILTER (WHERE event_type = 'kick' AND ts > NOW() - INTERVAL '1 day') as kicks_today,
-                COUNT(*) FILTER (WHERE event_type = 'join' AND ts > NOW() - INTERVAL '7 days') as joins_week
+                COUNT(CASE WHEN event_type = 'join' AND ts > NOW() - INTERVAL '1 day' THEN 1 END) as joins_today,
+                COUNT(CASE WHEN event_type = 'leave' AND ts > NOW() - INTERVAL '1 day' THEN 1 END) as leaves_today,
+                COUNT(CASE WHEN event_type = 'kick' AND ts > NOW() - INTERVAL '1 day' THEN 1 END) as kicks_today,
+                COUNT(CASE WHEN event_type = 'join' AND ts > NOW() - INTERVAL '7 days' THEN 1 END) as joins_week
             FROM member_events
         """)
         
@@ -2466,26 +2452,26 @@ async def content_bot_network_analysis(request: web.Request):
             LIMIT 20
         """)
         
-        bot_row = bot_stats[0] if bot_stats else (0, 0, 0, 0, 0)
-        member_row = member_stats[0] if member_stats else (0, 0, 0, 0)
+        bot_row = bot_stats[0] if bot_stats else {'total_groups': 0, 'total_users': 0, 'total_messages': 0, 'messages_today': 0, 'messages_week': 0}
+        member_row = member_stats[0] if member_stats else {'joins_today': 0, 'leaves_today': 0, 'kicks_today': 0, 'joins_week': 0}
         
         stats = {
             "timestamp": int(time.time()),
             "network": {
-                "total_groups": int(bot_row[0] or 0),
-                "total_users": int(bot_row[1] or 0),
-                "total_messages": int(bot_row[2] or 0),
-                "messages_today": int(bot_row[3] or 0),
-                "messages_week": int(bot_row[4] or 0),
-                "joins_today": int(member_row[0] or 0),
-                "leaves_today": int(member_row[1] or 0),
-                "kicks_today": int(member_row[2] or 0),
-                "joins_week": int(member_row[3] or 0),
+                "total_groups": int(bot_row.get('total_groups') or 0),
+                "total_users": int(bot_row.get('total_users') or 0),
+                "total_messages": int(bot_row.get('total_messages') or 0),
+                "messages_today": int(bot_row.get('messages_today') or 0),
+                "messages_week": int(bot_row.get('messages_week') or 0),
+                "joins_today": int(member_row.get('joins_today') or 0),
+                "leaves_today": int(member_row.get('leaves_today') or 0),
+                "kicks_today": int(member_row.get('kicks_today') or 0),
+                "joins_week": int(member_row.get('joins_week') or 0),
                 "active_groups": [
                     {
-                        "chat_id": int(g[0]),
-                        "messages": int(g[1]),
-                        "unique_users": int(g[2])
+                        "chat_id": int(g['chat_id']),
+                        "messages": int(g['msg_count']),
+                        "unique_users": int(g['unique_users'])
                     }
                     for g in (active_groups or [])
                 ]
