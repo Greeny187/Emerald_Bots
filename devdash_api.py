@@ -933,11 +933,12 @@ async def near_challenge(request: web.Request):
 async def ton_payments(request: web.Request):
     await _auth_user(request)
     address = request.query.get("address", "").strip()
-    limit   = int(request.query.get("limit", "20"))
+    limit = int(request.query.get("limit", "20"))
     if not address:
         raise web.HTTPBadRequest(text="address required")
-    headers={}
-    if TON_API_KEY: headers["Authorization"] = f"Bearer {TON_API_KEY}"
+    headers = {}
+    if TON_API_KEY:
+        headers["Authorization"] = f"Bearer {TON_API_KEY}"
     url = f"{TON_API_BASE}/v2/accounts/{address}/events?limit={limit}&subject_only=true"
     async with httpx.AsyncClient(timeout=10.0) as cx:
         r = await cx.get(url, headers=headers)
@@ -2832,6 +2833,560 @@ async def content_bot_complete_stats(request: web.Request):
         return _json(stats, request)
     except Exception as e:
         log.error("content_bot_complete_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+# ============================================================================
+# BOT-SPECIFIC STATISTICS ENDPOINTS
+# ============================================================================
+
+async def affiliate_bot_stats(request: web.Request):
+    """Affiliate Bot Statistiken: Referrals, Conversions, Commissions"""
+    await _auth_user(request)
+    try:
+        # Referrer stats
+        referrers = await fetch("""
+            SELECT
+                COUNT(DISTINCT referrer_id) as total_referrers,
+                COUNT(DISTINCT referred_user_id) as total_referrals,
+                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as conversions_total,
+                COUNT(DISTINCT CASE WHEN status='completed' THEN referred_user_id END) as converted_referrals
+            FROM aff_referrals
+        """)
+        
+        # Commissions
+        commissions = await fetch("""
+            SELECT
+                SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) as commissions_paid,
+                SUM(CASE WHEN status='pending' THEN amount ELSE 0 END) as commissions_pending,
+                COUNT(*) as total_commissions
+            FROM aff_commissions
+        """)
+        
+        # Top referrers
+        top_referrers = await fetch("""
+            SELECT
+                referrer_id,
+                COUNT(DISTINCT referred_user_id) as referral_count,
+                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as successful
+            FROM aff_referrals
+            GROUP BY referrer_id
+            ORDER BY referral_count DESC
+            LIMIT 10
+        """)
+        
+        ref = referrers[0] if referrers else {}
+        comm = commissions[0] if commissions else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_referrers": int(ref.get('total_referrers') or 0),
+            "total_referrals": int(ref.get('total_referrals') or 0),
+            "conversions_total": int(ref.get('conversions_total') or 0),
+            "converted_referrals": int(ref.get('converted_referrals') or 0),
+            "commissions_paid": float(comm.get('commissions_paid') or 0),
+            "commissions_pending": float(comm.get('commissions_pending') or 0),
+            "total_commissions": int(comm.get('total_commissions') or 0),
+            "top_referrers": [
+                {
+                    "rank": i+1,
+                    "referrer_id": int(r['referrer_id']),
+                    "referrals": int(r['referral_count']),
+                    "successful": int(r['successful'])
+                }
+                for i, r in enumerate(top_referrers or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("affiliate_bot_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def crossposter_bot_stats(request: web.Request):
+    """Crossposter Bot Statistiken: Posts, Channels, Rules"""
+    await _auth_user(request)
+    try:
+        # User and post stats
+        posts_data = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as total_users,
+                COUNT(*) as total_posts,
+                SUM(CASE WHEN status='posted' THEN 1 ELSE 0 END) as posted,
+                SUM(CASE WHEN status='draft' THEN 1 ELSE 0 END) as drafts,
+                SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
+            FROM crossposter_posts
+        """)
+        
+        # Channel stats
+        channels = await fetch("""
+            SELECT
+                COUNT(*) as total_channels,
+                SUM(CASE WHEN is_enabled=true THEN 1 ELSE 0 END) as enabled_channels,
+                COUNT(DISTINCT user_id) as users_with_channels
+            FROM crossposter_channels
+        """)
+        
+        # Rules
+        rules = await fetch("""
+            SELECT
+                COUNT(*) as total_rules,
+                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_rules
+            FROM crossposter_rules
+        """)
+        
+        # Top users
+        top_users = await fetch("""
+            SELECT
+                user_id,
+                COUNT(*) as post_count,
+                SUM(CASE WHEN status='posted' THEN 1 ELSE 0 END) as successful
+            FROM crossposter_posts
+            GROUP BY user_id
+            ORDER BY post_count DESC
+            LIMIT 10
+        """)
+        
+        p = posts_data[0] if posts_data else {}
+        c = channels[0] if channels else {}
+        r = rules[0] if rules else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_users": int(p.get('total_users') or 0),
+            "total_posts": int(p.get('total_posts') or 0),
+            "posted": int(p.get('posted') or 0),
+            "drafts": int(p.get('drafts') or 0),
+            "failed": int(p.get('failed') or 0),
+            "total_channels": int(c.get('total_channels') or 0),
+            "enabled_channels": int(c.get('enabled_channels') or 0),
+            "users_with_channels": int(c.get('users_with_channels') or 0),
+            "total_rules": int(r.get('total_rules') or 0),
+            "active_rules": int(r.get('active_rules') or 0),
+            "top_users": [
+                {
+                    "rank": i+1,
+                    "user_id": int(u['user_id']),
+                    "posts": int(u['post_count']),
+                    "successful": int(u['successful'])
+                }
+                for i, u in enumerate(top_users or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("crossposter_bot_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def dao_bot_stats(request: web.Request):
+    """DAO Bot Statistiken: Proposals, Votes, Treasury"""
+    await _auth_user(request)
+    try:
+        # Proposals
+        proposals = await fetch("""
+            SELECT
+                COUNT(*) as total_proposals,
+                SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active_proposals,
+                SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END) as passed_proposals,
+                SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) as rejected_proposals
+            FROM dao_proposals
+        """)
+        
+        # Voting
+        voting = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as total_voters,
+                COUNT(*) as total_votes,
+                AVG(CASE WHEN power IS NOT NULL THEN power ELSE 0 END) as avg_voting_power
+            FROM dao_votes
+        """)
+        
+        # Treasury
+        treasury = await fetch("""
+            SELECT
+                SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) as treasury_in,
+                SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) as treasury_out,
+                SUM(balance) as treasury_total
+            FROM dao_treasury
+        """)
+        
+        # Delegations
+        delegations = await fetch("""
+            SELECT
+                COUNT(DISTINCT delegator_id) as total_delegators,
+                COUNT(DISTINCT delegatee_id) as total_delegatees,
+                SUM(voting_power) as total_delegated_power
+            FROM dao_delegations
+        """)
+        
+        # Top proposals
+        top_proposals = await fetch("""
+            SELECT
+                id,
+                title,
+                status,
+                (SELECT COUNT(*) FROM dao_votes WHERE proposal_id=dao_proposals.id) as vote_count
+            FROM dao_proposals
+            ORDER BY vote_count DESC
+            LIMIT 5
+        """)
+        
+        p = proposals[0] if proposals else {}
+        v = voting[0] if voting else {}
+        t = treasury[0] if treasury else {}
+        d = delegations[0] if delegations else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_proposals": int(p.get('total_proposals') or 0),
+            "active_proposals": int(p.get('active_proposals') or 0),
+            "passed_proposals": int(p.get('passed_proposals') or 0),
+            "rejected_proposals": int(p.get('rejected_proposals') or 0),
+            "total_voters": int(v.get('total_voters') or 0),
+            "total_votes": int(v.get('total_votes') or 0),
+            "avg_voting_power": float(v.get('avg_voting_power') or 0),
+            "treasury_in": float(t.get('treasury_in') or 0),
+            "treasury_out": float(t.get('treasury_out') or 0),
+            "treasury_total": float(t.get('treasury_total') or 0),
+            "total_delegators": int(d.get('total_delegators') or 0),
+            "total_delegatees": int(d.get('total_delegatees') or 0),
+            "total_delegated_power": float(d.get('total_delegated_power') or 0),
+            "top_proposals": [
+                {
+                    "rank": i+1,
+                    "proposal_id": int(pr['id']),
+                    "title": pr['title'],
+                    "status": pr['status'],
+                    "votes": int(pr['vote_count'])
+                }
+                for i, pr in enumerate(top_proposals or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("dao_bot_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def learning_bot_stats(request: web.Request):
+    """Learning Bot Statistiken: Courses, Enrollments, Quizzes"""
+    await _auth_user(request)
+    try:
+        # Courses
+        courses = await fetch("""
+            SELECT
+                COUNT(*) as total_courses,
+                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_courses
+            FROM learning_courses
+        """)
+        
+        # Enrollments
+        enrollments = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as enrolled_users,
+                COUNT(*) as total_enrollments,
+                SUM(CASE WHEN completed=true THEN 1 ELSE 0 END) as completed_enrollments
+            FROM learning_enrollments
+        """)
+        
+        # Quizzes
+        quizzes = await fetch("""
+            SELECT
+                COUNT(*) as total_quizzes,
+                COUNT(DISTINCT user_id) as users_attempted,
+                SUM(CASE WHEN passed=true THEN 1 ELSE 0 END) as quiz_passers,
+                AVG(CASE WHEN score IS NOT NULL THEN score ELSE 0 END) as avg_score
+            FROM learning_quizzes
+        """)
+        
+        # Progress
+        progress = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as users_with_progress,
+                AVG(completion_percentage) as avg_completion
+            FROM learning_progress
+        """)
+        
+        # Top courses
+        top_courses = await fetch("""
+            SELECT
+                c.id,
+                c.title,
+                COUNT(DISTINCT e.user_id) as enrollments,
+                SUM(CASE WHEN e.completed=true THEN 1 ELSE 0 END) as completions
+            FROM learning_courses c
+            LEFT JOIN learning_enrollments e ON c.id = e.course_id
+            GROUP BY c.id, c.title
+            ORDER BY enrollments DESC
+            LIMIT 5
+        """)
+        
+        c = courses[0] if courses else {}
+        e = enrollments[0] if enrollments else {}
+        q = quizzes[0] if quizzes else {}
+        pr = progress[0] if progress else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_courses": int(c.get('total_courses') or 0),
+            "active_courses": int(c.get('active_courses') or 0),
+            "enrolled_users": int(e.get('enrolled_users') or 0),
+            "total_enrollments": int(e.get('total_enrollments') or 0),
+            "completed_courses": int(e.get('completed_enrollments') or 0),
+            "total_quizzes": int(q.get('total_quizzes') or 0),
+            "users_attempted": int(q.get('users_attempted') or 0),
+            "quiz_passers": int(q.get('quiz_passers') or 0),
+            "avg_quiz_score": float(q.get('avg_score') or 0),
+            "users_with_progress": int(pr.get('users_with_progress') or 0),
+            "avg_completion_percentage": float(pr.get('avg_completion') or 0),
+            "top_courses": [
+                {
+                    "rank": i+1,
+                    "course_id": int(tc['id']),
+                    "title": tc['title'],
+                    "enrollments": int(tc['enrollments'] or 0),
+                    "completions": int(tc['completions'] or 0)
+                }
+                for i, tc in enumerate(top_courses or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("learning_bot_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def support_bot_stats(request: web.Request):
+    """Support Bot Statistiken: Tickets, Messages, Resolution Time"""
+    await _auth_user(request)
+    try:
+        # Tickets
+        tickets = await fetch("""
+            SELECT
+                COUNT(*) as total_tickets,
+                SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open,
+                SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
+                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+                AVG(EXTRACT(EPOCH FROM (closed_at - created_at))/3600) as avg_resolution_hours
+            FROM support_tickets
+        """)
+        
+        # Users
+        users = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as support_users
+            FROM support_users
+        """)
+        
+        # Messages
+        messages = await fetch("""
+            SELECT
+                COUNT(*) as total_messages,
+                COUNT(DISTINCT ticket_id) as tickets_with_messages
+            FROM support_messages
+        """)
+        
+        # By category (using tenants as categories)
+        by_category = await fetch("""
+            SELECT
+                COALESCE(category, 'uncategorized') as category,
+                COUNT(*) as count,
+                SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as resolved
+            FROM support_tickets
+            GROUP BY category
+            ORDER BY count DESC
+        """)
+        
+        t = tickets[0] if tickets else {}
+        u = users[0] if users else {}
+        m = messages[0] if messages else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_tickets": int(t.get('total_tickets') or 0),
+            "open": int(t.get('open') or 0),
+            "closed": int(t.get('closed') or 0),
+            "pending": int(t.get('pending') or 0),
+            "avg_resolution_hours": float(t.get('avg_resolution_hours') or 0),
+            "support_users": int(u.get('support_users') or 0),
+            "total_messages": int(m.get('total_messages') or 0),
+            "tickets_with_messages": int(m.get('tickets_with_messages') or 0),
+            "by_category": [
+                {
+                    "category": cat['category'],
+                    "count": int(cat['count']),
+                    "resolved": int(cat['resolved'] or 0)
+                }
+                for cat in (by_category or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("support_bot_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def trade_api_bot_stats(request: web.Request):
+    """Trade API Bot Statistiken: Portfolios, Positions, Transactions"""
+    await _auth_user(request)
+    try:
+        # Portfolios
+        portfolios = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as total_users,
+                COUNT(*) as total_portfolios,
+                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_portfolios,
+                SUM(CASE WHEN total_value IS NOT NULL THEN total_value ELSE 0 END) as total_aum
+            FROM tradeapi_portfolios
+        """)
+        
+        # Positions
+        positions = await fetch("""
+            SELECT
+                COUNT(*) as total_positions,
+                COUNT(CASE WHEN is_active=true THEN 1 END) as active_positions,
+                SUM(CASE WHEN size IS NOT NULL THEN ABS(size) ELSE 0 END) as total_size
+            FROM tradeapi_positions
+        """)
+        
+        # Transactions
+        transactions = await fetch("""
+            SELECT
+                COUNT(*) as total_transactions,
+                SUM(CASE WHEN type='buy' THEN 1 ELSE 0 END) as buys,
+                SUM(CASE WHEN type='sell' THEN 1 ELSE 0 END) as sells,
+                AVG(CASE WHEN fees IS NOT NULL THEN fees ELSE 0 END) as avg_fees
+            FROM tradeapi_transactions
+        """)
+        
+        # Top portfolios
+        top_portfolios = await fetch("""
+            SELECT
+                user_id,
+                total_value,
+                (SELECT COUNT(*) FROM tradeapi_positions WHERE portfolio_user_id=tradeapi_portfolios.user_id) as position_count
+            FROM tradeapi_portfolios
+            WHERE is_active=true
+            ORDER BY total_value DESC
+            LIMIT 10
+        """)
+        
+        p = portfolios[0] if portfolios else {}
+        pos = positions[0] if positions else {}
+        t = transactions[0] if transactions else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_users": int(p.get('total_users') or 0),
+            "total_portfolios": int(p.get('total_portfolios') or 0),
+            "active_portfolios": int(p.get('active_portfolios') or 0),
+            "total_aum": float(p.get('total_aum') or 0),
+            "total_positions": int(pos.get('total_positions') or 0),
+            "active_positions": int(pos.get('active_positions') or 0),
+            "total_transactions": int(t.get('total_transactions') or 0),
+            "buys": int(t.get('buys') or 0),
+            "sells": int(t.get('sells') or 0),
+            "avg_fees": float(t.get('avg_fees') or 0),
+            "top_portfolios": [
+                {
+                    "rank": i+1,
+                    "user_id": int(tp['user_id']),
+                    "value": float(tp['total_value'] or 0),
+                    "positions": int(tp['position_count'] or 0)
+                }
+                for i, tp in enumerate(top_portfolios or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("trade_api_bot_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def trade_dex_bot_stats(request: web.Request):
+    """Trade DEX Bot Statistiken: Pools, Liquidity, Swaps"""
+    await _auth_user(request)
+    try:
+        # DEX config
+        dex_config = await fetch("""
+            SELECT
+                COUNT(DISTINCT dex_name) as total_dexes
+            FROM tradedex_dex_config
+        """)
+        
+        # Pools
+        pools = await fetch("""
+            SELECT
+                COUNT(*) as total_pools,
+                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_pools,
+                SUM(CASE WHEN tvl_usd IS NOT NULL THEN tvl_usd ELSE 0 END) as total_tvl_usd
+            FROM tradedex_pools
+        """)
+        
+        # Positions
+        positions = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as lp_users,
+                COUNT(*) as total_positions,
+                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_lp_positions
+            FROM tradedex_positions
+        """)
+        
+        # Swaps
+        swaps = await fetch("""
+            SELECT
+                COUNT(*) as total_swaps,
+                SUM(CASE WHEN volume_usd IS NOT NULL THEN volume_usd ELSE 0 END) as total_volume_usd,
+                AVG(CASE WHEN slippage IS NOT NULL THEN slippage ELSE 0 END) as avg_slippage
+            FROM tradedex_swaps
+        """)
+        
+        # Top pools by TVL
+        top_pools = await fetch("""
+            SELECT
+                pool_id,
+                token_a,
+                token_b,
+                tvl_usd,
+                (SELECT COUNT(*) FROM tradedex_positions WHERE pool_id=tradedex_pools.pool_id) as lp_count
+            FROM tradedex_pools
+            WHERE is_active=true
+            ORDER BY tvl_usd DESC
+            LIMIT 10
+        """)
+        
+        d = dex_config[0] if dex_config else {}
+        p = pools[0] if pools else {}
+        pos = positions[0] if positions else {}
+        s = swaps[0] if swaps else {}
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "total_dexes": int(d.get('total_dexes') or 0),
+            "total_pools": int(p.get('total_pools') or 0),
+            "active_pools": int(p.get('active_pools') or 0),
+            "total_tvl_usd": float(p.get('total_tvl_usd') or 0),
+            "lp_users": int(pos.get('lp_users') or 0),
+            "total_positions": int(pos.get('total_positions') or 0),
+            "active_lp_positions": int(pos.get('active_lp_positions') or 0),
+            "total_swaps": int(s.get('total_swaps') or 0),
+            "total_volume_usd": float(s.get('total_volume_usd') or 0),
+            "avg_slippage": float(s.get('avg_slippage') or 0),
+            "top_pools": [
+                {
+                    "rank": i+1,
+                    "pool_id": str(tp['pool_id']),
+                    "pair": f"{tp['token_a']}/{tp['token_b']}",
+                    "tvl": float(tp['tvl_usd'] or 0),
+                    "lp_count": int(tp['lp_count'] or 0)
+                }
+                for i, tp in enumerate(top_pools or [])
+            ]
+        }
+        return _json(stats, request)
+    except Exception as e:
+        log.error("trade_dex_bot_stats failed: %s", e, exc_info=True)
         return _json({"error": str(e)}, request, status=500)
 
 
