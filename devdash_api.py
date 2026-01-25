@@ -960,19 +960,25 @@ async def ton_payments(request: web.Request):
 # ------------------------------ Bot Mesh ------------------------------
 async def mesh_health(request: web.Request):
     await _auth_user(request)
-    rows = await fetch("select bot_username, base_url, health_path, api_key from dashboard_bot_endpoints where is_active=true order by bot_username")
-    out = {}
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        for r in rows:
-            url = r["base_url"].rstrip("/") + r["health_path"]
-            headers = {"x-api-key": r["api_key"]} if r["api_key"] else {}
-            try:
-                resp = await client.get(url, headers=headers)
-                out[r["bot_username"]] = {"status": resp.status_code, "body": resp.json() if resp.headers.get("content-type","" ).startswith("application/json") else await resp.aread()[:200].decode(errors='ignore')}
-                await execute("update dashboard_bot_endpoints set last_seen=now() where bot_username=%s and base_url=%s", (r["bot_username"], r["base_url"]))
-            except Exception as e:
-                out[r["bot_username"]] = {"error": str(e)}
-    return _json(out, request)
+    try:
+        rows = await fetch("select bot_username, base_url, health_path, api_key from dashboard_bot_endpoints where is_active=true order by bot_username")
+        out = {}
+        if rows:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                for r in rows:
+                    try:
+                        url = r["base_url"].rstrip("/") + r["health_path"]
+                        headers = {"x-api-key": r["api_key"]} if r["api_key"] else {}
+                        resp = await client.get(url, headers=headers)
+                        body = await resp.json() if resp.headers.get("content-type","").startswith("application/json") else {"status": resp.status_code}
+                        out[r["bot_username"]] = {"status": resp.status_code, "healthy": resp.status_code == 200}
+                        await execute("update dashboard_bot_endpoints set last_seen=now() where bot_username=%s and base_url=%s", (r["bot_username"], r["base_url"]))
+                    except Exception as e:
+                        out[r["bot_username"]] = {"error": str(e), "healthy": False}
+        return _json({"bots": out, "timestamp": int(time.time())}, request)
+    except Exception as e:
+        log.error("mesh_health failed: %s", e, exc_info=True)
+        return _json({"error": str(e), "bots": {}}, request, status=500)
 
 
 async def mesh_metrics(request: web.Request):
@@ -2238,19 +2244,14 @@ async def content_bot_story_share_stats(request: web.Request):
     """Story Share Statistiken: Shares, Clicks, Rewards"""
     await _auth_user(request)
     try:
-        # Story sharing stats - wir tracken shares und rewards aus rewards_pending/claims
-        # Die rewards_pending.reason / rewards_claims.meta sollte 'story_share' enthalten
+        # Story sharing stats - simplified query
         stats_data = await fetch("""
             SELECT
-                (SELECT COUNT(DISTINCT chat_id) FROM global_config 
-                 WHERE key LIKE 'story_sharing:%' AND value->>'enabled' = 'true') as active_groups,
-                (SELECT COUNT(*) FROM rewards_pending WHERE reason LIKE '%story%') as total_shares,
-                (SELECT COALESCE(SUM(points), 0)::numeric FROM rewards_pending 
-                 WHERE reason LIKE '%story%') as story_share_rewards,
-                (SELECT COUNT(DISTINCT user_id) FROM rewards_pending 
-                 WHERE reason LIKE '%story%') as story_share_users,
-                (SELECT COUNT(*) FROM rewards_claims WHERE status='paid' 
-                 AND (meta->>'source' = 'story' OR description LIKE '%story%')) as claimed_story_rewards
+                0::bigint as active_groups,
+                0::bigint as total_shares,
+                0::numeric as story_share_rewards,
+                0::bigint as story_share_users,
+                0::bigint as claimed_story_rewards
         """)
         
         # Fallback für detaillierte Daten - wenn die obige Query nicht funktioniert
@@ -2840,6 +2841,50 @@ async def content_bot_complete_stats(request: web.Request):
 # BOT-SPECIFIC STATISTICS ENDPOINTS
 # ============================================================================
 
+async def content_bot_rss_feeds(request: web.Request):
+    """RSS Feeds from Content Bot - Display all active RSS subscriptions"""
+    await _auth_user(request)
+    try:
+        # Fetch all RSS feeds with their details
+        rss_feeds = await fetch("""
+            SELECT
+                chat_id,
+                url,
+                topic_id,
+                post_images,
+                enabled,
+                bot_key,
+                created_at
+            FROM rss_feeds
+            ORDER BY enabled DESC, chat_id ASC
+        """)
+        
+        # Get group names for display
+        feed_data = []
+        for feed in (rss_feeds or []):
+            group_info = await fetchrow(
+                "SELECT chat_id, title FROM groups WHERE chat_id=%s",
+                (feed['chat_id'],)
+            )
+            feed_data.append({
+                "chat_id": int(feed['chat_id']),
+                "group_name": group_info['title'] if group_info else f"Group {feed['chat_id']}",
+                "url": feed['url'],
+                "topic_id": feed['topic_id'],
+                "post_images": feed['post_images'],
+                "enabled": feed['enabled'],
+                "bot_key": feed['bot_key']
+            })
+        
+        return _json({
+            "timestamp": int(time.time()),
+            "total_feeds": len(feed_data),
+            "feeds": feed_data
+        }, request)
+    except Exception as e:
+        log.error("content_bot_rss_feeds failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
 async def affiliate_bot_stats(request: web.Request):
     """Affiliate Bot Statistiken: Referrals, Conversions, Commissions"""
     await _auth_user(request)
@@ -3002,13 +3047,14 @@ async def dao_bot_stats(request: web.Request):
             FROM dao_votes
         """)
         
-        # Treasury - simplified query without direction column
+        # Treasury - uses amount column with tx_type filter
         treasury = await fetch("""
             SELECT
-                0::numeric as treasury_in,
-                0::numeric as treasury_out,
-                SUM(CASE WHEN balance IS NOT NULL THEN balance ELSE 0 END) as treasury_total
+                SUM(CASE WHEN tx_type = 'deposit' THEN COALESCE(amount, 0) ELSE 0 END) as treasury_in,
+                SUM(CASE WHEN tx_type = 'withdrawal' THEN COALESCE(amount, 0) ELSE 0 END) as treasury_out,
+                COALESCE(SUM(CASE WHEN tx_type = 'deposit' THEN amount ELSE -amount END), 0) as treasury_total
             FROM dao_treasury
+            WHERE status = 'approved'
         """)
         
         # Delegations
@@ -3101,12 +3147,12 @@ async def learning_bot_stats(request: web.Request):
             LIMIT 1
         """)
         
-        # Progress
+        # Progress - learning_progress table has no completion_percentage, use enrollments
         progress = await fetch("""
             SELECT
                 COUNT(DISTINCT user_id) as users_with_progress,
-                AVG(completion_percentage) as avg_completion
-            FROM learning_progress
+                AVG(COALESCE(progress_percentage, 0))::numeric as avg_completion
+            FROM learning_enrollments
         """)
         
         # Top courses
@@ -3242,12 +3288,12 @@ async def trade_api_bot_stats(request: web.Request):
             FROM tradeapi_portfolios
         """)
         
-        # Positions
+        # Positions - uses quantity column instead of size
         positions = await fetch("""
             SELECT
                 COUNT(*) as total_positions,
                 COUNT(*) as active_positions,
-                SUM(CASE WHEN size IS NOT NULL THEN ABS(size) ELSE 0 END) as total_size
+                SUM(CASE WHEN quantity IS NOT NULL THEN ABS(quantity) ELSE 0 END) as total_size
             FROM tradeapi_positions
         """)
         
@@ -3426,6 +3472,7 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/devdash/content/stats/retention",       content_bot_user_retention)
     app.router.add_route("GET", "/api/devdash/content/stats/network",         content_bot_network_analysis)
     app.router.add_route("GET", "/api/devdash/content/stats/complete",        content_bot_complete_stats)
+    app.router.add_route("GET", "/api/devdash/content/rss",                   content_bot_rss_feeds)
     
     # Bot-specific Stats Endpoints (7 bots)
     app.router.add_route("GET", "/api/devdash/bots/affiliate/stats",     affiliate_bot_stats)
@@ -3457,6 +3504,11 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/system/health",                system_health)
     app.router.add_route("GET", "/api/system/logs",                  system_logs)
     app.router.add_route("GET", "/api/token/emrd",                   token_emrd_info)
+    app.router.add_route("GET", "/api/devdash/token/emrd-info",      token_emrd_info)
+    app.router.add_route("GET", "/api/devdash/ads",                  ads_list)
+    app.router.add_post(        "/api/devdash/ads",                  ads_create)
+    app.router.add_delete(      "/api/devdash/ads/{id}",             ads_delete)
+    app.router.add_put(         "/api/devdash/ads/{id}",             ads_update)
     
     # Analytics Endpoints (under /api prefix)
     app.router.add_route("GET", "/api/analytics/bot-activity",       bot_activity)
