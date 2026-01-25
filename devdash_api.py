@@ -2484,6 +2484,287 @@ async def content_bot_network_analysis(request: web.Request):
         return _json({"error": str(e)}, request, status=500)
 
 
+async def content_bot_complete_stats(request: web.Request):
+    """🔥 KOMPLETTE STATISTIK - ALLES AUS DER DATENBANK!"""
+    await _auth_user(request)
+    try:
+        # 1. ALLE GRUPPEN MIT DETAILS
+        groups_data = await fetch("""
+            SELECT
+                g.chat_id,
+                g.title,
+                COUNT(DISTINCT m.user_id) as member_count,
+                COUNT(DISTINCT CASE WHEN m.is_deleted=FALSE THEN m.user_id END) as active_members,
+                COUNT(DISTINCT ml.user_id) as users_with_messages,
+                COUNT(ml.message_id) as total_messages,
+                COUNT(CASE WHEN ml.timestamp > NOW() - INTERVAL '24 hours' THEN 1 END) as messages_24h,
+                COUNT(CASE WHEN ml.timestamp > NOW() - INTERVAL '7 days' THEN 1 END) as messages_7d,
+                COUNT(CASE WHEN ml.timestamp > NOW() - INTERVAL '30 days' THEN 1 END) as messages_30d,
+                MAX(ml.timestamp) as last_message,
+                COUNT(DISTINCT CASE WHEN me.event_type='join' THEN 1 END) as total_joins,
+                COUNT(DISTINCT CASE WHEN me.event_type='leave' THEN 1 END) as total_leaves,
+                COUNT(DISTINCT CASE WHEN me.event_type='kick' THEN 1 END) as total_kicks,
+                COUNT(DISTINCT CASE WHEN ai.enabled=true THEN 1 END) as ai_enabled,
+                COUNT(DISTINCT ail.chat_id) as ai_actions,
+                COUNT(DISTINCT rf.chat_id) as rss_feeds
+            FROM groups g
+            LEFT JOIN members m ON g.chat_id = m.chat_id
+            LEFT JOIN message_logs ml ON g.chat_id = ml.chat_id
+            LEFT JOIN member_events me ON g.chat_id = me.chat_id
+            LEFT JOIN ai_mod_settings ai ON g.chat_id = ai.chat_id AND ai.enabled=true
+            LEFT JOIN ai_mod_logs ail ON g.chat_id = ail.chat_id
+            LEFT JOIN rss_feeds rf ON g.chat_id = rf.chat_id
+            GROUP BY g.chat_id, g.title
+            ORDER BY messages_24h DESC
+        """)
+        
+        # 2. TOKEN STATISTIKEN
+        token_stats = await fetch("""
+            SELECT
+                (SELECT COALESCE(SUM(points), 0)::numeric FROM rewards_pending) as total_pending,
+                (SELECT COALESCE(SUM(amount), 0)::numeric FROM rewards_claims WHERE status='paid') as total_paid,
+                (SELECT COALESCE(SUM(amount), 0)::numeric FROM rewards_claims WHERE status='pending') as total_pending_claims,
+                (SELECT COUNT(*) FROM rewards_pending WHERE points > 0) as holders,
+                (SELECT COUNT(*) FROM rewards_claims WHERE status='pending') as pending_claims_count,
+                (SELECT COUNT(*) FROM rewards_claims) as total_claims
+        """)
+        
+        # 3. AI MODERATION STATS
+        ai_stats = await fetch("""
+            SELECT
+                (SELECT COUNT(DISTINCT chat_id) FROM ai_mod_settings WHERE enabled=true) as ai_groups,
+                (SELECT COUNT(*) FROM ai_mod_logs WHERE ts > NOW() - INTERVAL '24 hours') as ai_24h,
+                (SELECT COUNT(*) FROM ai_mod_logs WHERE ts > NOW() - INTERVAL '7 days') as ai_7d,
+                (SELECT COUNT(*) FROM ai_mod_logs WHERE ts > NOW() - INTERVAL '30 days') as ai_30d,
+                (SELECT COUNT(DISTINCT category) FROM ai_mod_logs) as ai_categories,
+                (SELECT COUNT(*) FROM user_strike_events) as total_strikes,
+                (SELECT COUNT(*) FROM user_strike_events WHERE ts > NOW() - INTERVAL '24 hours') as strikes_24h
+        """)
+        
+        # 4. USER ENGAGEMENT
+        user_stats = await fetch("""
+            SELECT
+                COUNT(DISTINCT user_id) as total_users,
+                COUNT(DISTINCT CASE WHEN timestamp > NOW() - INTERVAL '1 day' THEN user_id END) as active_24h,
+                COUNT(DISTINCT CASE WHEN timestamp > NOW() - INTERVAL '7 days' THEN user_id END) as active_7d,
+                COUNT(DISTINCT CASE WHEN timestamp > NOW() - INTERVAL '30 days' THEN user_id END) as active_30d,
+                COUNT(*) as total_messages,
+                ROUND(AVG(CAST(cnt AS numeric)), 2) as avg_messages_per_user
+            FROM (
+                SELECT user_id, COUNT(*) as cnt FROM message_logs GROUP BY user_id
+            ) sub
+        """)
+        
+        # 5. TOP USERS
+        top_users = await fetch("""
+            SELECT
+                user_id,
+                COUNT(*) as message_count,
+                COUNT(DISTINCT chat_id) as groups_active,
+                MAX(timestamp) as last_message,
+                MIN(timestamp) as first_message
+            FROM message_logs
+            GROUP BY user_id
+            ORDER BY message_count DESC
+            LIMIT 50
+        """)
+        
+        # 6. TOP TALKERS PER GROUP
+        top_talkers = await fetch("""
+            SELECT
+                chat_id,
+                user_id,
+                COUNT(*) as messages
+            FROM message_logs
+            GROUP BY chat_id, user_id
+            ORDER BY chat_id, messages DESC
+        """)
+        
+        # 7. AI MODERATION BY CATEGORY
+        ai_by_category = await fetch("""
+            SELECT
+                category,
+                COUNT(*) as count,
+                COUNT(CASE WHEN action='delete' THEN 1 END) as deleted,
+                COUNT(CASE WHEN action='warn' THEN 1 END) as warned,
+                ROUND(AVG(score)::numeric, 3) as avg_score
+            FROM ai_mod_logs
+            GROUP BY category
+            ORDER BY count DESC
+        """)
+        
+        # 8. REWARDS DISTRIBUTION
+        top_holders = await fetch("""
+            SELECT
+                user_id,
+                points,
+                ROUND((100.0 * points / NULLIF((SELECT SUM(points) FROM rewards_pending), 0))::numeric, 2) as percentage
+            FROM rewards_pending
+            WHERE points > 0
+            ORDER BY points DESC
+            LIMIT 50
+        """)
+        
+        # 9. MEMBER EVENTS
+        member_events = await fetch("""
+            SELECT
+                chat_id,
+                event_type,
+                COUNT(*) as count,
+                MAX(ts) as last_event
+            FROM member_events
+            GROUP BY chat_id, event_type
+            ORDER BY chat_id, event_type
+        """)
+        
+        # 10. TIME STATS
+        time_stats = await fetch("""
+            SELECT
+                EXTRACT(HOUR FROM timestamp AT TIME ZONE 'Europe/Berlin') as hour,
+                COUNT(*) as messages,
+                COUNT(DISTINCT user_id) as users,
+                COUNT(DISTINCT chat_id) as groups
+            FROM message_logs
+            WHERE timestamp > NOW() - INTERVAL '30 days'
+            GROUP BY EXTRACT(HOUR FROM timestamp AT TIME ZONE 'Europe/Berlin')
+            ORDER BY hour
+        """)
+        
+        # Parse token stats
+        t_row = token_stats[0] if token_stats else {'total_pending': 0, 'total_paid': 0, 'total_pending_claims': 0, 'holders': 0, 'pending_claims_count': 0, 'total_claims': 0}
+        a_row = ai_stats[0] if ai_stats else {'ai_groups': 0, 'ai_24h': 0, 'ai_7d': 0, 'ai_30d': 0, 'ai_categories': 0, 'total_strikes': 0, 'strikes_24h': 0}
+        u_row = user_stats[0] if user_stats else {'total_users': 0, 'active_24h': 0, 'active_7d': 0, 'active_30d': 0, 'total_messages': 0, 'avg_messages_per_user': 0}
+        
+        # Group talkers by chat_id
+        talkers_by_group = {}
+        for t in (top_talkers or []):
+            cid = int(t['chat_id'])
+            if cid not in talkers_by_group:
+                talkers_by_group[cid] = []
+            if len(talkers_by_group[cid]) < 10:  # Top 10 per group
+                talkers_by_group[cid].append({
+                    "user_id": int(t['user_id']),
+                    "messages": int(t['messages'])
+                })
+        
+        # Group events by chat_id
+        events_by_group = {}
+        for e in (member_events or []):
+            cid = int(e['chat_id'])
+            if cid not in events_by_group:
+                events_by_group[cid] = {}
+            events_by_group[cid][e['event_type']] = {
+                "count": int(e['count']),
+                "last_event": e['last_event'].isoformat() if e['last_event'] else None
+            }
+        
+        # Build complete response
+        stats = {
+            "timestamp": int(time.time()),
+            "summary": {
+                "total_groups": len(groups_data or []),
+                "total_users": int(u_row.get('total_users') or 0),
+                "total_messages": int(u_row.get('total_messages') or 0),
+                "total_ai_actions": int(a_row.get('ai_24h') + a_row.get('ai_7d') + a_row.get('ai_30d') or 0),
+                "total_token_distributed": float(t_row.get('total_paid') or 0),
+                "total_token_pending": float(t_row.get('total_pending') or 0),
+            },
+            "groups": [
+                {
+                    "chat_id": int(g['chat_id']),
+                    "name": g['title'],
+                    "stats": {
+                        "members": int(g['member_count'] or 0),
+                        "active_members": int(g['active_members'] or 0),
+                        "users_with_messages": int(g['users_with_messages'] or 0),
+                        "messages_total": int(g['total_messages'] or 0),
+                        "messages_24h": int(g['messages_24h'] or 0),
+                        "messages_7d": int(g['messages_7d'] or 0),
+                        "messages_30d": int(g['messages_30d'] or 0),
+                        "last_message": g['last_message'].isoformat() if g['last_message'] else None,
+                    },
+                    "events": events_by_group.get(int(g['chat_id']), {}),
+                    "ai_moderation": {
+                        "enabled": bool(g['ai_enabled']),
+                        "actions": int(g['ai_actions'] or 0),
+                    },
+                    "rss_feeds": int(g['rss_feeds'] or 0),
+                    "top_talkers": talkers_by_group.get(int(g['chat_id']), [])
+                }
+                for g in (groups_data or [])
+            ],
+            "tokens": {
+                "total_pending": float(t_row.get('total_pending') or 0),
+                "total_claimed": float(t_row.get('total_paid') or 0),
+                "pending_claims_amount": float(t_row.get('total_pending_claims') or 0),
+                "holders": int(t_row.get('holders') or 0),
+                "pending_claims_count": int(t_row.get('pending_claims_count') or 0),
+                "total_claims_all_time": int(t_row.get('total_claims') or 0),
+                "top_holders": [
+                    {
+                        "rank": i+1,
+                        "user_id": int(h['user_id']),
+                        "balance": float(h['points'] or 0),
+                        "percentage": float(h['percentage'] or 0)
+                    }
+                    for i, h in enumerate(top_holders or [])
+                ]
+            },
+            "ai_moderation": {
+                "enabled_groups": int(a_row.get('ai_groups') or 0),
+                "actions_24h": int(a_row.get('ai_24h') or 0),
+                "actions_7d": int(a_row.get('ai_7d') or 0),
+                "actions_30d": int(a_row.get('ai_30d') or 0),
+                "categories": int(a_row.get('ai_categories') or 0),
+                "total_strikes": int(a_row.get('total_strikes') or 0),
+                "strikes_24h": int(a_row.get('strikes_24h') or 0),
+                "by_category": [
+                    {
+                        "category": c['category'],
+                        "count": int(c['count']),
+                        "deleted": int(c['deleted'] or 0),
+                        "warned": int(c['warned'] or 0),
+                        "avg_score": float(c['avg_score'] or 0)
+                    }
+                    for c in (ai_by_category or [])
+                ]
+            },
+            "users": {
+                "total": int(u_row.get('total_users') or 0),
+                "active_24h": int(u_row.get('active_24h') or 0),
+                "active_7d": int(u_row.get('active_7d') or 0),
+                "active_30d": int(u_row.get('active_30d') or 0),
+                "total_messages": int(u_row.get('total_messages') or 0),
+                "avg_messages_per_user": float(u_row.get('avg_messages_per_user') or 0),
+                "top_users": [
+                    {
+                        "rank": i+1,
+                        "user_id": int(u['user_id']),
+                        "messages": int(u['message_count']),
+                        "groups_active": int(u['groups_active'] or 0),
+                        "first_message": u['first_message'].isoformat() if u['first_message'] else None,
+                        "last_message": u['last_message'].isoformat() if u['last_message'] else None
+                    }
+                    for i, u in enumerate(top_users or [])
+                ]
+            },
+            "hourly_distribution": [
+                {
+                    "hour": int(t['hour']),
+                    "messages": int(t['messages']),
+                    "users": int(t['users']),
+                    "groups": int(t['groups'])
+                }
+                for t in (time_stats or [])
+            ]
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_complete_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
 def register_devdash_routes(app: web.Application):
     # Doppelte Registrierung verhindern (Heroku Reloads, mehrfacher Aufruf)
     if app.get("_devdash_routes_registered"):
@@ -2534,6 +2815,7 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/devdash/content/stats/features",       content_bot_features_stats)
     app.router.add_route("GET", "/api/devdash/content/stats/retention",      content_bot_user_retention)
     app.router.add_route("GET", "/api/devdash/content/stats/network",        content_bot_network_analysis)
+    app.router.add_route("GET", "/api/devdash/content/stats/complete",       content_bot_complete_stats)
     
     # Wallets & Payments
     app.router.add_post(        "/api/devdash/wallets/ton",           set_ton_address)
