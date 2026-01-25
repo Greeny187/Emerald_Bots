@@ -2271,9 +2271,9 @@ async def content_bot_story_share_stats(request: web.Request):
         clicks_data = await fetch("""
             SELECT COUNT(*) as total_clicks
             FROM rewards_claims 
-            WHERE status=%s AND (meta->>'source' = %s OR description ILIKE %s)
+            WHERE status=%s AND description ILIKE %s
             LIMIT 1
-        """, ('paid', 'story_click', '%click%'))
+        """, ('paid', '%click%'))
         clicks_row = clicks_data[0] if clicks_data else {'total_clicks': 0}
         
         total_shares = int(row.get('total_shares') or 0)
@@ -3071,7 +3071,7 @@ async def dao_bot_stats(request: web.Request):
                 id,
                 title,
                 status,
-                (SELECT COUNT(*) FROM dao_votes WHERE proposal_id=dao_proposals.id) as vote_count
+                (SELECT COUNT(*) FROM dao_votes WHERE proposal_id=CAST(dao_proposals.id AS integer)) as vote_count
             FROM dao_proposals
             ORDER BY vote_count DESC
             LIMIT 5
@@ -3296,12 +3296,12 @@ async def trade_api_bot_stats(request: web.Request):
             FROM tradeapi_positions
         """)
         
-        # Transactions - use positions instead
+        # Transactions - use positions count instead
         transactions = await fetch("""
             SELECT
                 COUNT(*) as total_transactions,
-                SUM(CASE WHEN side='buy' THEN 1 ELSE 0 END) as buys,
-                SUM(CASE WHEN side='sell' THEN 1 ELSE 0 END) as sells,
+                0 as buys,
+                0 as sells,
                 0 as avg_fees
             FROM tradeapi_positions
             LIMIT 1
