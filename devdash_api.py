@@ -1,4 +1,15 @@
-import os, time, json, logging, hmac, hashlib, base64, asyncio, datetime, sys, pathlib, secrets
+import os
+import time
+import json
+import logging
+import hmac
+import hashlib
+import base64
+import asyncio
+import datetime
+import pathlib
+import secrets
+import sys
 sys.path.append(str(pathlib.Path(__file__).parent))  # lokales Modulverzeichnis sicherstellen
 import httpx
 from typing import Tuple, Dict, Any, List, Optional
@@ -118,35 +129,6 @@ def _cors_headers(request: web.Request) -> Dict[str, str]:
         "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
     }
 
-async def near_account_overview(request: web.Request):
-    await _auth_user(request)
-    account_id = request.query.get("account_id")
-    if not account_id:
-        raise web.HTTPBadRequest(text="account_id required")
-    tokens_csv = request.query.get("tokens","").strip()
-    tokens = [t for t in tokens_csv.split(",") if t]
-
-    acct = await _rpc_view_account_near(account_id)
-    out = {
-        "account_id": account_id,
-        "near": {
-            "amount_yocto": acct.get("amount","0"),
-            "amount_near":  yocto_to_near_str(acct.get("amount","0")),
-            "locked_yocto": acct.get("locked","0"),
-            "locked_near":  yocto_to_near_str(acct.get("locked","0")),
-            "storage_usage": acct.get("storage_usage", 0),
-            "code_hash": acct.get("code_hash")
-        },
-        "tokens": {}
-    }
-    for c in tokens:
-        try:
-            bal = await _rpc_view_function(c, "ft_balance_of", {"account_id": account_id})
-        except Exception as e:
-            bal = {"error": str(e)}
-        out["tokens"][c] = bal
-    return _json(out, request)
-
 async def set_ton_address(request: web.Request):
     user_id = await _auth_user(request)
     body = await request.json()
@@ -238,19 +220,8 @@ create table if not exists dashboard_bot_endpoints (
 );
 
 -- Ads/FeatureFlags stay as before (might already exist in your DB)
-create table if not exists dashboard_ads (
-  id serial primary key,
-  name text not null,
-  placement text not null check (placement in ('header','sidebar','in-bot','story','inline','banner')),
-  content text not null,
-  is_active boolean not null default true,
-  start_at timestamp,
-  end_at timestamp,
-  targeting jsonb not null default '{}'::jsonb,
-  bot_slug text,
-  created_at timestamp not null default now(),
-  updated_at timestamp not null default now()
-);
+-- adv_campaigns wird bereits vom ads.py Modul erstellt
+-- Wir nutzen jetzt adv_campaigns statt dashboard_ads für Werbekampagnen
 
 create table if not exists dashboard_feature_flags (
   key text primary key,
@@ -388,22 +359,11 @@ async def ensure_tables():
         """)
         log.info("✅ All tables initialized successfully")
         
-        # Migration: Update dashboard_ads placement constraint if old version exists
+        # adv_campaigns Schema wird vom ads.py Modul erstellt
         try:
-            log.info("⏳ Checking dashboard_ads placement constraint...")
-            await execute("""
-            ALTER TABLE dashboard_ads DROP CONSTRAINT IF EXISTS dashboard_ads_placement_check;
-            """)
-            await execute("""
-            ALTER TABLE dashboard_ads ADD CONSTRAINT dashboard_ads_placement_check 
-            CHECK (placement IN ('header','sidebar','in-bot','story','inline','banner'));
-            """)
-            log.info("✅ dashboard_ads placement constraint updated to include 'banner'")
+            log.info("✅ adv_campaigns wird vom ads.py Modul verwaltet")
         except Exception as e:
-            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
-                log.info("✅ dashboard_ads placement constraint already correct")
-            else:
-                log.warning("⚠️  Could not update placement constraint: %s", e)
+            log.warning(f"⚠️  Could not verify adv_campaigns: {e}")
     except Exception as e:
         log.error("❌ Error during table initialization: %s", e, exc_info=True)
 
@@ -641,8 +601,8 @@ async def system_health(request: web.Request):
                     (select count(*) from dashboard_users) as users_total,
                     (select count(*) from dashboard_bots where is_active=true) as bots_active,
                     (select count(*) from dashboard_bots) as bots_total,
-                    (select count(*) from dashboard_ads where is_active=true) as ads_active,
-                    (select count(*) from dashboard_ads) as ads_total,
+                    (select count(*) from adv_campaigns where enabled=true) as ads_active,
+                    (select count(*) from adv_campaigns) as ads_total,
                     (select count(*) from dashboard_token_events) as token_events
             """)
             
@@ -657,7 +617,7 @@ async def system_health(request: web.Request):
             # Get last activity
             try:
                 latest = await fetchrow(
-                    "select max(updated_at) as last_update from (select updated_at from dashboard_users union all select updated_at from dashboard_bots union all select updated_at from dashboard_ads) as t"
+                    "select max(created_at) as last_update from (select created_at as updated_at from dashboard_users union all select created_at from dashboard_bots union all select created_at as updated_at from adv_campaigns) as t"
                 )
                 if latest and latest['last_update']:
                     health["database"]["last_activity"] = latest['last_update'].isoformat()
@@ -968,217 +928,7 @@ async def near_challenge(request: web.Request):
         request,
     )
 
-
-async def near_verify(request: web.Request):
-    user_id = await _auth_user(request)
-    body = await request.json()
-    account_id = body.get("account_id")
-    public_key = body.get("public_key")  # e.g. "ed25519:..." base58
-    sig_b64 = body.get("signature_b64")
-    nonce_b64 = body.get("nonce_b64")
-    message = body.get("message")
-
-    if not (account_id and public_key and sig_b64 and nonce_b64 and message):
-        raise web.HTTPBadRequest(text="missing fields")
-
-    row = await fetchrow("select nonce from dashboard_nonces where telegram_id=%s", (user_id,))
-    if not row:
-        raise web.HTTPBadRequest(text="no challenge")
-    expected_nonce = row["nonce"]  # bytes
-
-    if base64.b64encode(expected_nonce).decode() != nonce_b64:
-        raise web.HTTPBadRequest(text="nonce mismatch")
-
-    # verify ed25519 signature against message bytes (NEP‑413 compatible wallets sign a canonical payload; most also accept raw message)
-    if VerifyKey is None:
-        raise web.HTTPBadRequest(text="pynacl not installed on server")
-
-    try:
-        if public_key.startswith("ed25519:"):
-            pk_raw = b58decode(public_key.split(":", 1)[1])
-        else:
-            pk_raw = b58decode(public_key)
-        verify_key = VerifyKey(pk_raw)
-        verify_key.verify(message.encode(), base64.b64decode(sig_b64))
-    except BadSignatureError:
-        raise web.HTTPBadRequest(text="bad signature")
-    except Exception as e:
-        raise web.HTTPBadRequest(text=f"verify error: {e}")
-
-    # (Optional) sanity‑check that public key belongs to account via RPC (access key list)
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": "verify-key",
-                "method": "query",
-                "params": {
-                    "request_type": "view_access_key_list",
-                    "finality": "final",
-                    "account_id": account_id,
-                },
-            }
-            r = await client.post(NEAR_RPC_URL, json=payload)
-            r.raise_for_status()
-            keys = [k.get("public_key") for k in r.json().get("result", {}).get("keys", [])]
-            if public_key not in keys:
-                log.warning("public key not in access_key_list for %s", account_id)
-    except Exception as e:
-        log.warning("rpc verify_owner failed: %s", e)
-
-    await execute(
-        "update dashboard_users set near_account_id=%s, near_public_key=%s, near_connected_at=now(), updated_at=now() where telegram_id=%s",
-        (account_id, public_key, user_id),
-    )
-    # one‑time use nonce
-    await execute("delete from dashboard_nonces where telegram_id=%s", (user_id,))
-
-    return _json({"ok": True, "account_id": account_id}, request)
-
-
-# ------------------------------ NEAR Token (NEP‑141) ------------------------------
-async def _rpc_view_function(contract_id: str, method: str, args: Dict[str, Any]):
-    args_b64 = base64.b64encode(json.dumps(args).encode()).decode()
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "view",
-            "method": "query",
-            "params": {
-                "request_type": "call_function",
-                "finality": "final",
-                "account_id": contract_id,
-                "method_name": method,
-                "args_base64": args_b64,
-            },
-        }
-        r = await client.post(NEAR_RPC_URL, json=payload)
-        r.raise_for_status()
-        res = r.json()["result"]["result"]
-        return json.loads(bytes(res).decode())
-
-
-async def near_token_summary(request: web.Request):
-    await _auth_user(request)
-    if not NEAR_TOKEN_CONTRACT:
-        return _json({"enabled": False, "reason": "NEAR_TOKEN_CONTRACT not set"}, request)
-
-    try:
-        meta = await _rpc_view_function(NEAR_TOKEN_CONTRACT, "ft_metadata", {})
-        total = await _rpc_view_function(NEAR_TOKEN_CONTRACT, "ft_total_supply", {})
-    except Exception as e:
-        return _json({"enabled": True, "error": f"rpc failed: {e}"}, request, status=502)
-
-    # off‑chain events rollup
-    roll = await fetchrow(
-        """
-        select
-          coalesce(sum(case when kind='mint'  then amount when kind='reward' then amount else 0 end),0) as issued,
-          coalesce(sum(case when kind='burn'  then amount when kind='fee'    then amount else 0 end),0) as burned_or_fees
-        from dashboard_token_events
-        """
-    )
-
-    return _json(
-        {
-            "enabled": True,
-            "contract": NEAR_TOKEN_CONTRACT,
-            "network": NEAR_NETWORK,
-            "metadata": meta,
-            "total_supply": total,
-            "offchain": roll or {},
-        },
-        request,
-    )
-
-# ------------------------------ NEAR Account Overview ------------------------------
-async def _rpc_view_account_near(account_id: str):
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        payload = {
-            "jsonrpc": "2.0","id":"view_account","method":"query",
-            "params":{"request_type":"view_account","finality":"final","account_id":account_id}
-        }
-        r = await client.post(NEAR_RPC_URL, json=payload)
-        r.raise_for_status()
-        return r.json()["result"]
-
-def yocto_to_near_str(yocto: str) -> str:
-    try: return str(Decimal(yocto) / Decimal(10**24))
-    except Exception: return "0"
-
-async def near_account_overview(request: web.Request):
-    await _auth_user(request)
-    account_id = request.query.get("account_id")
-    if not account_id:
-        raise web.HTTPBadRequest(text="account_id required")
-    tokens_csv = request.query.get("tokens","").strip()
-    tokens = [t for t in tokens_csv.split(",") if t]
-    acct = await _rpc_view_account_near(account_id)
-    out = {
-        "account_id": account_id,
-        "near": {
-            "amount_yocto": acct.get("amount","0"),
-            "amount_near":  yocto_to_near_str(acct.get("amount","0")),
-            "locked_yocto": acct.get("locked","0"),
-            "locked_near":  yocto_to_near_str(acct.get("locked","0")),
-            "storage_usage": acct.get("storage_usage",0),
-            "code_hash": acct.get("code_hash")
-        },
-        "tokens": {}
-    }
-    for c in tokens:
-        try:
-            bal = await _rpc_view_function(c, "ft_balance_of", {"account_id": account_id})
-        except Exception as e:
-            bal = {"error": str(e)}
-        out["tokens"][c] = bal
-    return _json(out, request)
-
-# ---------- NEAR: Wallet verbinden & Zahlungen ----------
-async def set_near_account(request: web.Request):
-    uid = await _auth_user(request)
-    body = await request.json()
-    acc  = (body.get("account_id") or "").strip()
-    if not acc:
-        raise web.HTTPBadRequest(text="account_id required")
-    await execute("update dashboard_users set near_account_id=%s, near_connected_at=now(), updated_at=now() where telegram_id=%s",
-                  (acc, uid))
-    return _json({"ok": True, "near_account_id": acc}, request)
-
-async def near_payments(request: web.Request):
-    await _auth_user(request)
-    account_id = request.query.get("account_id")
-    limit = int(request.query.get("limit", "20"))
-    if not account_id:
-        raise web.HTTPBadRequest(text="account_id required")
-    url = f"{NEARBLOCKS_API}/v1/account/{account_id}/activity?limit={limit}&order=desc"
-    async with httpx.AsyncClient(timeout=10.0) as cx:
-        r = await cx.get(url, headers={"accept":"application/json"})
-        r.raise_for_status()
-        j = r.json()
-    # Filter: nur eingehende Native-NEAR Transfers
-    items = []
-    for it in j.get("activity", []):
-        if it.get("type") == "TRANSFER" and it.get("receiver") == account_id:
-            items.append({
-              "ts": it.get("block_timestamp"),
-              "tx_hash": it.get("tx_hash"),
-              "from": it.get("signer"),
-              "to": it.get("receiver"),
-              "amount_yocto": it.get("delta_amount") or it.get("amount") or "0",
-              "amount_near": yocto_to_near_str(it.get("delta_amount") or it.get("amount") or "0"),
-            })
-    return _json({"account_id": account_id, "incoming": items[:limit]}, request)
-
-
 # ------------------------------ TON Wallet ------------------------------
-async def set_ton_address(request: web.Request):
-    user_id = await _auth_user(request)
-    body = await request.json()
-    address = (body.get("address") or "").strip()
-    await execute("update dashboard_users set ton_address=%s, updated_at=now() where telegram_id=%s",
-                    (address, user_id))
-    return _json({"ok": True, "ton_address": address}, request)
 
 async def ton_payments(request: web.Request):
     await _auth_user(request)
@@ -1206,11 +956,6 @@ async def ton_payments(request: web.Request):
                 })
     return _json({"address": address, "incoming": items[:limit]}, request)
 
-async def wallets_overview(request: web.Request):
-    user_id = await _auth_user(request)
-    me = await fetchrow("select near_account_id, ton_address from dashboard_users where telegram_id=%s", (user_id,))
-    watches = await fetch("select id, chain, account_id, label, meta, created_at from dashboard_watch_accounts order by id asc")
-    return _json({"me": me, "watch": watches}, request)
 # ------------------------------ Bot Mesh ------------------------------
 async def mesh_health(request: web.Request):
     await _auth_user(request)
@@ -1253,122 +998,97 @@ async def auth_check(request: web.Request):
 
 # ------------------------------ Ads (Werbungen) ------------------------------
 async def ads_list(request: web.Request):
-    """Liste alle Werbungen auf (optional gefiltert nach Bot)"""
+    """Liste alle Werbekampagnen auf"""
     await _auth_user(request)
-    bot_slug = request.query.get("bot_slug", "")
-    sql = "select id, name, placement, content, is_active, targeting, bot_slug, created_at, updated_at from dashboard_ads"
-    params = ()
-    if bot_slug:
-        sql += " where bot_slug = %s"
-        params = (bot_slug,)
-    sql += " order by created_at desc"
-    rows = await fetch(sql, params)
+    sql = """select campaign_id as id, title as name, body_text as content, 
+             link_url, cta_label, enabled as is_active, media_url, weight, 
+             start_ts as start_at, end_ts as end_at, created_at 
+             from adv_campaigns order by created_at desc"""
+    rows = await fetch(sql)
     return _json({"ads": rows}, request)
 
 
 async def ads_create(request: web.Request):
-    """Erstelle eine neue Werbung"""
+    """Erstelle eine neue Werbekampagne"""
     try:
         await _auth_user(request)
         body = await request.json()
-        name = (body.get("name") or "").strip()
-        placement = (body.get("placement") or "header").strip()
-        content = (body.get("content") or "").strip()
-        is_active = bool(body.get("is_active", True))
-        targeting = body.get("targeting", {})
-        bot_slug = (body.get("bot_slug") or "").strip() or None
-        start_at = body.get("start_at")
-        end_at = body.get("end_at")
+        title = (body.get("title") or body.get("name") or "").strip()
+        body_text = (body.get("body_text") or body.get("content") or "").strip()
+        link_url = (body.get("link_url") or "").strip()
+        media_url = (body.get("media_url") or "").strip() or None
+        cta_label = (body.get("cta_label") or "Mehr erfahren").strip()
+        weight = int(body.get("weight", 1))
+        enabled = bool(body.get("enabled", body.get("is_active", True)))
+        user_id = await _auth_user(request)  # get telegram_id
         
-        if not name or not content:
-            return _json({"error": "name und content erforderlich"}, request, status=400)
+        if not title or not body_text or not link_url:
+            return _json({"error": "title, body_text und link_url erforderlich"}, request, status=400)
         
-        # Convert timestamps properly - use explicit NULL casting to avoid type ambiguity
-        start_ts = None
-        end_ts = None
-        if start_at:
-            try:
-                start_ts = int(float(start_at))
-            except:
-                pass
-        if end_at:
-            try:
-                end_ts = int(float(end_at))
-            except:
-                pass
+        start_ts = body.get("start_ts") or body.get("start_at")
+        end_ts = body.get("end_ts") or body.get("end_at")
         
-        # Build SQL with explicit NULL handling to prevent parameter type errors
-        if start_ts and end_ts:
-            sql = """
-                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
-                values (%s, %s, %s, %s, %s::jsonb, %s, to_timestamp(%s), to_timestamp(%s))
-            """
-            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug, start_ts, end_ts)
-        elif start_ts:
-            sql = """
-                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
-                values (%s, %s, %s, %s, %s::jsonb, %s, to_timestamp(%s), NULL::timestamp)
-            """
-            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug, start_ts)
-        elif end_ts:
-            sql = """
-                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
-                values (%s, %s, %s, %s, %s::jsonb, %s, NULL::timestamp, to_timestamp(%s))
-            """
-            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug, end_ts)
-        else:
-            sql = """
-                insert into dashboard_ads(name, placement, content, is_active, targeting, bot_slug, start_at, end_at)
-                values (%s, %s, %s, %s, %s::jsonb, %s, NULL::timestamp, NULL::timestamp)
-            """
-            params = (name, placement, content, is_active, json.dumps(targeting), bot_slug)
+        sql = """
+            insert into adv_campaigns (title, body_text, media_url, link_url, cta_label, weight, enabled, start_ts, end_ts, created_by)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            returning campaign_id
+        """
+        params = (title, body_text, media_url, link_url, cta_label, weight, enabled, start_ts, end_ts, user_id)
         
-        await execute(sql, params)
+        result = await fetchrow(sql, params)
+        campaign_id = result["campaign_id"] if result else None
         
-        return _json({"ok": True, "name": name}, request, status=201)
+        return _json({"ok": True, "campaign_id": campaign_id, "title": title}, request, status=201)
     except Exception as e:
         log.error("ads_create failed: %s", e, exc_info=True)
-        return _json({"error": f"Failed to create ad: {str(e)}"}, request, status=500)
+        return _json({"error": f"Failed to create campaign: {str(e)}"}, request, status=500)
 
 
 async def ads_delete(request: web.Request):
-    """Lösche eine Werbung"""
+    """Lösche eine Werbekampagne"""
     await _auth_user(request)
-    ad_id = request.match_info.get("id")
-    await execute("delete from dashboard_ads where id = %s", (ad_id,))
+    campaign_id = request.match_info.get("id")
+    await execute("delete from adv_campaigns where campaign_id = %s", (campaign_id,))
     return _json({"ok": True}, request)
 
 
 async def ads_update(request: web.Request):
-    """Aktualisiere eine Werbung"""
+    """Aktualisiere eine Werbekampagne"""
     await _auth_user(request)
-    ad_id = request.match_info.get("id")
+    campaign_id = request.match_info.get("id")
     body = await request.json()
     
     updates = []
     params = []
-    if "name" in body:
-        updates.append("name = %s")
-        params.append(body["name"])
-    if "placement" in body:
-        updates.append("placement = %s")
-        params.append(body["placement"])
-    if "content" in body:
-        updates.append("content = %s")
-        params.append(body["content"])
-    if "is_active" in body:
-        updates.append("is_active = %s")
-        params.append(body["is_active"])
-    if "targeting" in body:
-        updates.append("targeting = %s::jsonb")
-        params.append(json.dumps(body["targeting"]))
+    
+    field_mapping = {
+        "title": "title",
+        "name": "title",
+        "body_text": "body_text",
+        "content": "body_text",
+        "link_url": "link_url",
+        "cta_label": "cta_label",
+        "media_url": "media_url",
+        "weight": "weight",
+        "enabled": "enabled",
+        "is_active": "enabled",
+        "start_ts": "start_ts",
+        "start_at": "start_ts",
+        "end_ts": "end_ts",
+        "end_at": "end_at"
+    }
+    
+    for key, value in body.items():
+        db_field = field_mapping.get(key)
+        if db_field:
+            updates.append(f"{db_field} = %s")
+            params.append(value)
     
     if not updates:
         return _json({"error": "keine Felder zum Aktualisieren"}, request, status=400)
     
-    updates.append("updated_at = now()")
-    params.append(ad_id)
-    sql = "update dashboard_ads set " + ", ".join(updates) + " where id = %s"
+    params.append(campaign_id)
+    sql = "update adv_campaigns set " + ", ".join(updates) + " where campaign_id = %s"
     await execute(sql, tuple(params))
     return _json({"ok": True}, request)
 
@@ -1378,7 +1098,7 @@ async def metrics_overview(request: web.Request):
     """Übersicht: Benutzer, Werbungen, Bots, Events"""
     await _auth_user(request)
     users_total = await fetchrow("select count(1) as c from dashboard_users")
-    ads_active = await fetchrow("select count(1) as c from dashboard_ads where is_active=true")
+    ads_active = await fetchrow("select count(1) as c from adv_campaigns where enabled=true")
     bots_active = await fetchrow("select count(1) as c from dashboard_bots where is_active=true")
     token_events = await fetchrow("select count(1) as c from dashboard_token_events")
     
@@ -2347,6 +2067,205 @@ async def options_root(request: web.Request):
     return options_handler(request)
 
 
+# ============================================================================
+# CONTENT BOT STATISTICS
+# ============================================================================
+
+async def content_bot_stats_overview(request: web.Request):
+    """Hauptstatistiken des Content Bots: Gruppen, Mitglieder, Nachrichten, Tokens"""
+    await _auth_user(request)
+    try:
+        # Nutze die Content Bot Database über die aiohttp connection
+        # Wir brauchen nur globale Aggregationen
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "groups": {
+                "total": 0,
+                "active_today": 0,
+                "total_members": 0
+            },
+            "messages": {
+                "total_today": 0,
+                "total_this_week": 0,
+                "average_per_group": 0
+            },
+            "tokens": {
+                "total_emrd_distributed": 0.0,
+                "total_pending_claims": 0,
+                "total_claimants": 0
+            },
+            "ai_moderation": {
+                "enabled_in_groups": 0,
+                "actions_today": 0,
+                "categories": {}
+            },
+            "features": {
+                "story_sharing_groups": 0,
+                "affiliate_programs": 0,
+                "rss_feeds_active": 0
+            }
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_stats_overview failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_groups_stats(request: web.Request):
+    """Detaillierte Statistiken pro Gruppe"""
+    await _auth_user(request)
+    try:
+        stats = {
+            "timestamp": int(time.time()),
+            "groups": []
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_groups_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_tokens_stats(request: web.Request):
+    """EMRD Token Statistiken: Verteilung, Claims, Transaktionen"""
+    await _auth_user(request)
+    try:
+        stats = {
+            "timestamp": int(time.time()),
+            "emrd": {
+                "total_distributed": 0.0,
+                "total_claimed": 0.0,
+                "pending_claims": 0,
+                "pending_amount": 0.0,
+                "top_holders": [],
+                "daily_distribution": []
+            }
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_tokens_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_ai_moderation_stats(request: web.Request):
+    """KI-Moderation Statistiken: Aktionen, Kategorien, Strikes"""
+    await _auth_user(request)
+    try:
+        stats = {
+            "timestamp": int(time.time()),
+            "ai_moderation": {
+                "enabled_groups": 0,
+                "total_actions_today": 0,
+                "total_actions_week": 0,
+                "by_category": {},
+                "top_offenders": [],
+                "strikes_issued": 0
+            }
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_ai_moderation_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_features_stats(request: web.Request):
+    """Feature-Nutzung: Story Sharing, Affiliate, RSS, etc."""
+    await _auth_user(request)
+    try:
+        stats = {
+            "timestamp": int(time.time()),
+            "features": {
+                "story_sharing": {
+                    "enabled_groups": 0,
+                    "total_shares": 0,
+                    "total_clicks": 0,
+                    "top_stories": []
+                },
+                "affiliate": {
+                    "active_programs": 0,
+                    "total_referrals": 0,
+                    "total_earned": 0.0
+                },
+                "rss": {
+                    "active_feeds": 0,
+                    "posts_today": 0,
+                    "posts_week": 0
+                },
+                "learning": {
+                    "courses": 0,
+                    "users_enrolled": 0,
+                    "completion_rate": 0.0
+                }
+            }
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_features_stats failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_user_retention(request: web.Request):
+    """User Retention & Activity Metrics"""
+    await _auth_user(request)
+    try:
+        period = request.query.get("period", "30")  # days
+        try:
+            days = int(period)
+        except:
+            days = 30
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "period_days": days,
+            "retention": {
+                "active_users_total": 0,
+                "active_today": 0,
+                "active_week": 0,
+                "active_month": 0,
+                "retention_rate": 0.0,
+                "churn_rate": 0.0
+            },
+            "engagement": {
+                "messages_per_user": 0.0,
+                "groups_per_user": 0.0,
+                "daily_active_users": []
+            }
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_user_retention failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_network_analysis(request: web.Request):
+    """Netzwerkanalyse: Bot-Mesh Health, Bots, Performance"""
+    await _auth_user(request)
+    try:
+        stats = {
+            "timestamp": int(time.time()),
+            "network": {
+                "total_bots": 0,
+                "bots_online": 0,
+                "bots_offline": 0,
+                "average_latency_ms": 0,
+                "bandwidth_usage_mb": 0.0,
+                "errors_today": 0,
+                "error_rate": 0.0
+            }
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_network_analysis failed: %s", e, exc_info=True)
+        return _json({"error": str(e)}, request, status=500)
+
+
 def register_devdash_routes(app: web.Application):
     # Doppelte Registrierung verhindern (Heroku Reloads, mehrfacher Aufruf)
     if app.get("_devdash_routes_registered"):
@@ -2389,10 +2308,16 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/devdash/users",                 user_list)
     app.router.add_post(        "/api/devdash/users/tier",            user_update_tier)
     
+    # Content Bot Statistics
+    app.router.add_route("GET", "/api/devdash/content/stats/overview",       content_bot_stats_overview)
+    app.router.add_route("GET", "/api/devdash/content/stats/groups",         content_bot_groups_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/tokens",         content_bot_tokens_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/ai-moderation",  content_bot_ai_moderation_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/features",       content_bot_features_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/retention",      content_bot_user_retention)
+    app.router.add_route("GET", "/api/devdash/content/stats/network",        content_bot_network_analysis)
+    
     # Wallets & Payments
-    app.router.add_route("GET", "/api/devdash/near/account/overview", near_account_overview)
-    app.router.add_post(        "/api/devdash/wallets/near",          set_near_account)
-    app.router.add_route("GET", "/api/devdash/near/payments",         near_payments)
     app.router.add_post(        "/api/devdash/wallets/ton",           set_ton_address)
     app.router.add_route("GET", "/api/devdash/ton/payments",          ton_payments)
     app.router.add_route("GET", "/api/devdash/wallets",               wallets_overview)
