@@ -28,31 +28,20 @@ WEBSITE  = "https://greeny187.github.io/GreenyManagementBots/"
 SUPPORT  = "https://t.me/+DkUfIvjyej8zNGVi"
 TON_WALLET = os.getenv("TON_WALLET_ADDRESS", "UQBopac1WFJGC_K48T8T8...")
 
-# Coinbase Commerce API Konfiguration
-COINBASE_API_KEY = os.getenv("COINBASE_COMMERCE_API_KEY", "")
-COINBASE_API_URL = "https://api.commerce.coinbase.com/charges"
-COINBASE_WEBHOOK_SECRET = os.getenv("COINBASE_WEBHOOK_SECRET", "")
-
 # WalletConnect Konfiguration
 WALLETCONNECT_PROJECT_ID = os.getenv("WALLETCONNECT_PROJECT_ID", "")
 WALLETCONNECT_ICON = "https://emeraldcontent.com/icon.png"  # Bot Icon URL
 
 PROVIDERS = {
-    "paypal": {
-        "label": "PayPal",
-        "link_base": os.getenv("PAYPAL_LINK_BASE"),
-    },
-    "coinbase": {
-        "label": "Coinbase Commerce",
-        "api_key": COINBASE_API_KEY,
-        "webhook_secret": COINBASE_WEBHOOK_SECRET,
-    },
     "walletconnect_ton": {
         "label": "TonConnect (TON / EMRD)",
         "wallet": TON_WALLET,
     },
+    "paypal": {
+        "label": "PayPal",
+        "link_base": os.getenv("PAYPAL_LINK_BASE"),
+    },
 }
-
 
 PLANS = {
     "pro_monthly": {

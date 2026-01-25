@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import json
 import logging
@@ -44,11 +44,6 @@ else:
     log.info("✅ BOT_TOKEN ist gesetzt")
 
 
-# NEAR config
-NEAR_NETWORK = os.getenv("NEAR_NETWORK", "mainnet")  # "mainnet" | "testnet"
-NEAR_RPC_URL = os.getenv("NEAR_RPC_URL", "https://rpc.mainnet.near.org")
-NEAR_TOKEN_CONTRACT = os.getenv("NEAR_TOKEN_CONTRACT", "")  # z.B. token.emeraldcontent.near
-NEARBLOCKS_API = os.getenv("NEARBLOCKS_API", "https://api.nearblocks.io")
 TON_API_BASE   = os.getenv("TON_API_BASE", "https://tonapi.io")
 TON_API_KEY    = os.getenv("TON_API_KEY", "")
 
@@ -138,9 +133,9 @@ async def set_ton_address(request: web.Request):
     return _json({"ok": True, "ton_address": address}, request)
 
 async def wallets_overview(request: web.Request):
-    # Liefert Watch-Accounts (NEAR/TON) + eigene TON-Adresse (aus dashboard_users)
+    # Liefert Watch-Accounts (TON) + eigene TON-Adresse (aus dashboard_users)
     user_id = await _auth_user(request)
-    me = await fetchrow("select near_account_id, ton_address from dashboard_users where telegram_id=%s", (user_id,))
+    me = await fetchrow("select ton_address from dashboard_users where telegram_id=%s", (user_id,))
     watches = await fetch("select id,chain,account_id,label,meta,created_at from dashboard_watch_accounts order by id asc")
     return _json({"me": me, "watch": watches}, request)
 
@@ -186,10 +181,6 @@ create table if not exists dashboard_users (
   photo_url text,
   role text not null default 'dev',
   tier text not null default 'pro',
-  -- NEAR binding
-  near_account_id text,
-  near_public_key text,
-  near_connected_at timestamp,
   created_at timestamp not null default now(),
   updated_at timestamp not null default now()
 );
@@ -229,7 +220,7 @@ create table if not exists dashboard_feature_flags (
   description text
 );
 
--- Login challenges for NEAR signature binding
+-- Login challenges for signature binding
 create table if not exists dashboard_nonces (
   telegram_id bigint not null,
   nonce bytea not null,
@@ -264,9 +255,6 @@ async def ensure_tables():
             role             TEXT NOT NULL DEFAULT 'dev',
             tier             TEXT NOT NULL DEFAULT 'pro',
             ton_address      TEXT,
-            near_account_id  TEXT,
-            near_public_key  TEXT,
-            near_connected_at TIMESTAMPTZ,
             created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -319,7 +307,7 @@ async def ensure_tables():
         await execute("""
         CREATE TABLE IF NOT EXISTS dashboard_watch_accounts (
             id         BIGSERIAL PRIMARY KEY,
-            chain      TEXT NOT NULL CHECK (chain IN ('near','ton')),
+            chain      TEXT NOT NULL CHECK (chain IN ('ton')),
             account_id TEXT NOT NULL,
             label      TEXT,
             meta       JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -328,35 +316,6 @@ async def ensure_tables():
         );
         """)
         log.info("✅ dashboard_watch_accounts table ready")
-
-        # singleton settings we can edit from code (TON/NEAR defaults)
-        await execute("""
-        CREATE TABLE IF NOT EXISTS devdash_settings (
-            id                SMALLINT PRIMARY KEY DEFAULT 1,
-            near_watch_account TEXT,
-            ton_address        TEXT,
-            updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        """)
-        log.info("✅ devdash_settings table ready")
-
-        # defaults: ONLY emeraldcontent.near, TON hard-bound to you
-        await execute("""
-        INSERT INTO devdash_settings (id, near_watch_account, ton_address)
-        VALUES (1, 'emeraldcontent.near', 'UQBVG-RRn7l5QZkfS4yhy8M3yhu-uniUrJc4Uy4Qkom-RFo2')
-        ON CONFLICT (id) DO UPDATE
-        SET near_watch_account = EXCLUDED.near_watch_account,
-            ton_address        = EXCLUDED.ton_address,
-            updated_at         = NOW();
-        """)
-        log.info("✅ devdash_settings configured")
-
-        # make sure watchlist contains the one near account we care about
-        await execute("""
-        INSERT INTO dashboard_watch_accounts (chain, account_id, label)
-        VALUES ('near', 'emeraldcontent.near', 'emeraldcontent.near')
-        ON CONFLICT (chain, account_id) DO NOTHING;
-        """)
         log.info("✅ All tables initialized successfully")
         
         # adv_campaigns Schema wird vom ads.py Modul erstellt
@@ -791,48 +750,7 @@ async def auth_ton_wallet(request: web.Request):
         return _json({"error": str(e)}, request, status=400)
 
 
-async def auth_near_wallet(request: web.Request):
-    """
-    NEAR WALLET LOGIN - Alternative authentication via NEAR wallet.
-    
-    Request: { "near_account_id": "user.near", "public_key": "...", "signature": "..." }
-    Response: { "access_token": "jwt", "token_type": "bearer" }
-    """
-    log.info("auth_near_wallet hit")
-    try:
-        body = await request.json()
-        near_account_id = (body.get("near_account_id") or "").strip()
-        
-        if not near_account_id:
-            return _json({"error": "near_account_id required"}, request, status=400)
-        
-        # Generate a synthetic telegram_id from NEAR account hash
-        synthetic_id = int.from_bytes(
-            hashlib.sha256(near_account_id.encode()).digest()[:8],
-            byteorder='big'
-        ) % (2**53)
-        
-        log.info(f"NEAR login for account={near_account_id}, synthetic_id={synthetic_id}")
-        
-        await execute("""
-            insert into dashboard_users(telegram_id, near_account_id, role, tier)
-            values(%s, %s, 'user', 'pro')
-            on conflict(telegram_id) do update set
-              near_account_id=excluded.near_account_id,
-              updated_at=now()
-        """, (synthetic_id, near_account_id))
-        
-        token = _jwt_issue(synthetic_id, role="user", tier="pro")
-        return _json({
-            "access_token": token,
-            "token_type": "bearer",
-            "role": "user",
-            "tier": "pro",
-            "method": "near_wallet"
-        }, request)
-    except Exception as e:
-        log.error("NEAR wallet auth failed: %s", e, exc_info=True)
-        return _json({"error": str(e)}, request, status=400)
+
 
 
 async def me(request: web.Request):
@@ -908,25 +826,6 @@ async def bots_add(request: web.Request):
     return _json(row, request, status=201)
 
 
-# ------------------------------ NEAR Connect ------------------------------
-async def near_challenge(request: web.Request):
-    user_id = await _auth_user(request)
-    nonce = secrets.token_bytes(32)
-    # one active nonce per user (replaced on each request)
-    await execute(
-        "insert into dashboard_nonces(telegram_id, nonce) values(%s,%s) on conflict (telegram_id) do update set nonce=excluded.nonce, created_at=now()",
-        (user_id, nonce),
-    )
-    message = f"Login to Emerald DevDash — tg:{user_id}"  # human‑readable tag
-    return _json(
-        {
-            "network": NEAR_NETWORK,
-            "recipient": "emerald.dev",  # any domain/app tag; not on‑chain
-            "nonce_b64": base64.b64encode(nonce).decode(),
-            "message": message,
-        },
-        request,
-    )
 
 # ------------------------------ TON Wallet ------------------------------
 
@@ -1338,7 +1237,6 @@ async def user_segments_analysis(request):
             tier,
             role,
             COUNT(*) as user_count,
-            COUNT(CASE WHEN near_account_id IS NOT NULL THEN 1 END) as near_connected,
             COUNT(CASE WHEN ton_address IS NOT NULL THEN 1 END) as ton_connected,
             MIN(created_at) as first_user,
             MAX(created_at) as last_user
@@ -1352,7 +1250,6 @@ async def user_segments_analysis(request):
     return _json({
         "segments": rows,
         "total_users": sum(r['user_count'] for r in rows),
-        "connected_near": sum(r['near_connected'] for r in rows),
         "connected_ton": sum(r['ton_connected'] for r in rows)
     }, request)
 
@@ -3236,7 +3133,6 @@ def register_devdash_routes(app: web.Application):
     app.router.add_post(        "/api/devdash/dev-login",             dev_login)
     app.router.add_post(        "/api/devdash/auth/telegram",         auth_telegram)
     app.router.add_post(        "/api/devdash/auth/ton-wallet",       auth_ton_wallet)
-    app.router.add_post(        "/api/devdash/auth/near-wallet",      auth_near_wallet)
     app.router.add_route("GET", "/api/devdash/me",                    me)
     
     # Metrics
@@ -3340,3 +3236,4 @@ if __name__ == "__main__":
     register_devdash_routes(app)
     app.on_startup.append(ensure_tables)
     web.run_app(app, port=int(os.getenv("PORT", 8080)))
+

@@ -41,7 +41,7 @@ async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFA
             await query.answer("❌ Ungültige Anfrage", show_alert=True)
             return
         
-        provider = parts[1]  # coinbase, paypal, walletconnect_ton, etc.
+        provider = parts[1]  # walletconnect_ton oder paypal
         plan_key = parts[2]  # pro_monthly, pro_yearly
         
         user_id = query.from_user.id
@@ -49,10 +49,10 @@ async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFA
         
         logger.info(f"[payment] User {user_id} requesting {provider} payment for {plan_key}")
         
-        # Webhook URL für Coinbase
+        # Webhook URL ist nur noch für spätere Provider relevant (aktuell nicht genutzt)
         webhook_url = context.bot_data.get("webhook_base_url", "https://emeraldcontent.com/webhook")
         
-        # Erstelle Checkout
+        # Erstelle Checkout (TonConnect / PayPal)
         result = create_checkout(chat_id or user_id, provider, plan_key, user_id, webhook_url)
         
         if "error" in result:
@@ -60,14 +60,8 @@ async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFA
             await query.answer(f"❌ {result['error']}", show_alert=True)
             return
         
-        # Provider-spezifische Behandlung
-        if provider == "coinbase":
-            # Starte async Charge-Erstellung
-            asyncio.create_task(
-                _handle_coinbase_payment(query, result, context)
-            )
-        
-        elif provider in ("walletconnect_ton"):
+          # Provider-spezifische Behandlung
+        if provider == "walletconnect_ton":
             # Deep Link zu Wallet
             uri = result.get("uri", "")
             if uri:
@@ -86,8 +80,8 @@ async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFA
             else:
                 await query.answer("❌ Wallet-Link konnte nicht erstellt werden", show_alert=True)
         
-        elif provider in ("paypal", "stars", "binance", "bybit"):
-            # External Payment Link
+        elif provider == "paypal":
+            # Externer Payment-Link (PayPal)
             url = result.get("url", "")
             if url:
                 await query.edit_message_text(
@@ -103,7 +97,7 @@ async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFA
                     parse_mode="Markdown"
                 )
             else:
-                await query.answer("❌ Zahlungs-Link nicht verfügbar", show_alert=True)
+                await query.answer("❌ PayPal-Link nicht verfügbar", show_alert=True)
         
         else:
             await query.answer(f"❌ Provider {provider} wird nicht unterstützt", show_alert=True)
@@ -111,52 +105,6 @@ async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFA
     except Exception as e:
         logger.exception(f"[payment] Callback error: {e}")
         await query.answer(f"❌ Fehler: {str(e)[:50]}", show_alert=True)
-
-async def _handle_coinbase_payment(query, checkout_result, context):
-    """
-    Erstelle Coinbase Commerce Charge und sende User zum Checkout.
-    """
-    try:
-        order_id = checkout_result.get("order_id")
-        price = checkout_result.get("price")
-        plan_key = checkout_result.get("price")  # gleich wie oben, aber semantischer
-        
-        logger.info(f"[coinbase] Creating charge for order {order_id}...")
-        
-        # Async Charge erstellen
-        charge_result = await create_coinbase_charge(
-            order_id=order_id,
-            price_eur=price,
-            description=f"Emerald PRO {plan_key}",
-            webhook_url=context.bot_data.get("webhook_base_url", "https://emeraldcontent.com/webhook")
-        )
-        
-        if "error" in charge_result:
-            logger.error(f"[coinbase] Charge creation failed: {charge_result['error']}")
-            await query.answer(f"❌ Coinbase Fehler: {charge_result['error']}", show_alert=True)
-            return
-        
-        hosted_url = charge_result.get("hosted_url")
-        charge_id = charge_result.get("charge_id")
-        
-        logger.info(f"[coinbase] Charge {charge_id} created, redirecting to {hosted_url}")
-        
-        await query.edit_message_text(
-            text=f"💳 **Coinbase Commerce Zahlung**\n\n"
-                 f"Betrag: €{price}\n"
-                 f"Order ID: `{order_id}`\n\n"
-                 f"👉 [Zur Zahlung bei Coinbase]({hosted_url})\n\n"
-                 f"Die Zahlung wird nach Abschluss automatisch aktiviert.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Zahlung starten", url=hosted_url)],
-                [InlineKeyboardButton("🔄 Status prüfen", callback_data="pay:status")],
-            ]),
-            parse_mode="Markdown"
-        )
-    
-    except Exception as e:
-        logger.exception(f"[coinbase] Payment handling error: {e}")
-        await query.answer(f"❌ Fehler bei Zahlung: {str(e)[:50]}", show_alert=True)
 
 async def handle_pro_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
