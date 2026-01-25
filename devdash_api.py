@@ -2873,6 +2873,15 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/devdash/content/stats/network",         content_bot_network_analysis)
     app.router.add_route("GET", "/api/devdash/content/stats/complete",        content_bot_complete_stats)
     
+    # Bot-specific Stats Endpoints (7 bots)
+    app.router.add_route("GET", "/api/devdash/bots/affiliate/stats",     affiliate_bot_stats)
+    app.router.add_route("GET", "/api/devdash/bots/crossposter/stats",   crossposter_bot_stats)
+    app.router.add_route("GET", "/api/devdash/bots/dao/stats",           dao_bot_stats)
+    app.router.add_route("GET", "/api/devdash/bots/learning/stats",      learning_bot_stats)
+    app.router.add_route("GET", "/api/devdash/bots/support/stats",       support_bot_stats)
+    app.router.add_route("GET", "/api/devdash/bots/trade_api/stats",     trade_api_bot_stats)
+    app.router.add_route("GET", "/api/devdash/bots/trade_dex/stats",     trade_dex_bot_stats)
+    
     # Token Events
     app.router.add_route("GET", "/api/devdash/token-events",          token_events_list)
     app.router.add_post(        "/api/devdash/token-events",          token_events_create)
@@ -2880,16 +2889,6 @@ def register_devdash_routes(app: web.Application):
     # User Management
     app.router.add_route("GET", "/api/devdash/users",                 user_list)
     app.router.add_post(        "/api/devdash/users/tier",            user_update_tier)
-    
-    # Content Bot Statistics
-    app.router.add_route("GET", "/api/devdash/content/stats/overview",       content_bot_stats_overview)
-    app.router.add_route("GET", "/api/devdash/content/stats/groups",         content_bot_groups_stats)
-    app.router.add_route("GET", "/api/devdash/content/stats/claimed",        content_bot_claimed_stats)
-    app.router.add_route("GET", "/api/devdash/content/stats/story-share",    content_bot_story_share_stats)
-    app.router.add_route("GET", "/api/devdash/content/stats/ai-moderation",  content_bot_ai_moderation_stats)
-    app.router.add_route("GET", "/api/devdash/content/stats/retention",      content_bot_user_retention)
-    app.router.add_route("GET", "/api/devdash/content/stats/network",        content_bot_network_analysis)
-    app.router.add_route("GET", "/api/devdash/content/stats/complete",       content_bot_complete_stats)
     
     # Wallets & Payments
     app.router.add_post(        "/api/devdash/wallets/ton",           set_ton_address)
@@ -2917,24 +2916,6 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("OPTIONS", "/api/system/{tail:.*}", options_handler)
     app.router.add_route("OPTIONS", "/api/token/{tail:.*}", options_handler)
     app.router.add_route("OPTIONS", "/api/analytics/{tail:.*}", options_handler)
-    
-    
-        # Advanced Analytics
-    app.router.add_route("GET", "/devdash/analytics/ads/performance", ad_performance_report)
-    app.router.add_route("GET", "/devdash/analytics/ads/roi", ad_roi_analysis)
-    app.router.add_route("GET", "/devdash/analytics/users/segments", user_segments_analysis)
-    app.router.add_route("GET", "/devdash/analytics/users/retention", user_retention_analysis)
-    app.router.add_route("GET", "/devdash/analytics/token/economics", token_economics_summary)
-    app.router.add_route("GET", "/devdash/analytics/token/velocity", token_velocity_analysis)
-    app.router.add_route("GET", "/devdash/analytics/bots/health", bot_health_dashboard)
-    
-    # Webhooks
-    app.router.add_post("/devdash/webhooks", webhook_create)
-    app.router.add_post("/devdash/webhooks/{id}/test", webhook_test)
-    
-    # Exports
-    app.router.add_route("GET", "/devdash/export/users.csv", export_users_csv)
-    app.router.add_route("GET", "/devdash/export/ads-report", export_ads_report)
     
 # If you run this module standalone, boot a tiny aiohttp app for local testing
 if __name__ == "__main__":
