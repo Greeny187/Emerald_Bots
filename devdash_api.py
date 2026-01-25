@@ -961,18 +961,18 @@ async def ton_payments(request: web.Request):
 async def mesh_health(request: web.Request):
     await _auth_user(request)
     try:
-        rows = await fetch("select bot_username, base_url, health_path, api_key from dashboard_bot_endpoints where is_active=true order by bot_username")
+        rows = await fetch("select id, base_url, health_path, api_key from dashboard_bot_endpoints where is_active=true order by id")
         out = {}
         if rows:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 for r in rows:
                     try:
-                        url = r["base_url"].rstrip("/") + r["health_path"]
-                        headers = {"x-api-key": r["api_key"]} if r["api_key"] else {}
+                        url = r.get("base_url", "").rstrip("/") + r.get("health_path", "/health")
+                        headers = {"x-api-key": r.get("api_key", "")} if r.get("api_key") else {}
                         resp = await client.get(url, headers=headers)
                         body = await resp.json() if resp.headers.get("content-type","").startswith("application/json") else {"status": resp.status_code}
-                        out[r["bot_username"]] = {"status": resp.status_code, "healthy": resp.status_code == 200}
-                        await execute("update dashboard_bot_endpoints set last_seen=now() where bot_username=%s and base_url=%s", (r["bot_username"], r["base_url"]))
+                        out[str(r.get("id", "unknown"))] = {"status": resp.status_code, "healthy": resp.status_code == 200}
+                        await execute("update dashboard_bot_endpoints set last_seen=now() where id=%s", (r.get("id"),))
                     except Exception as e:
                         out[r["bot_username"]] = {"error": str(e), "healthy": False}
         return _json({"bots": out, "timestamp": int(time.time())}, request)
@@ -2271,9 +2271,9 @@ async def content_bot_story_share_stats(request: web.Request):
         clicks_data = await fetch("""
             SELECT COUNT(*) as total_clicks
             FROM rewards_claims 
-            WHERE status='paid' AND (meta->>'source' = 'story_click' OR description LIKE '%click%')
+            WHERE status=%s AND (meta->>'source' = %s OR description ILIKE %s)
             LIMIT 1
-        """)
+        """, ('paid', 'story_click', '%click%'))
         clicks_row = clicks_data[0] if clicks_data else {'total_clicks': 0}
         
         total_shares = int(row.get('total_shares') or 0)
@@ -2853,8 +2853,7 @@ async def content_bot_rss_feeds(request: web.Request):
                 topic_id,
                 post_images,
                 enabled,
-                bot_key,
-                created_at
+                bot_key
             FROM rss_feeds
             ORDER BY enabled DESC, chat_id ASC
         """)
@@ -3061,7 +3060,7 @@ async def dao_bot_stats(request: web.Request):
         delegations = await fetch("""
             SELECT
                 COUNT(DISTINCT delegator_id) as total_delegators,
-                COUNT(DISTINCT delegatee_id) as total_delegatees,
+                COUNT(DISTINCT delegate_id) as total_delegatees,
                 SUM(voting_power) as total_delegated_power
             FROM dao_delegations
         """)
@@ -3147,11 +3146,11 @@ async def learning_bot_stats(request: web.Request):
             LIMIT 1
         """)
         
-        # Progress - learning_progress table has no completion_percentage, use enrollments
+        # Progress - learning_enrollments table tracks user progress
         progress = await fetch("""
             SELECT
                 COUNT(DISTINCT user_id) as users_with_progress,
-                AVG(COALESCE(progress_percentage, 0))::numeric as avg_completion
+                AVG(COALESCE(CAST(completed_at IS NOT NULL AS int), 0))::numeric as avg_completion
             FROM learning_enrollments
         """)
         
@@ -3297,14 +3296,15 @@ async def trade_api_bot_stats(request: web.Request):
             FROM tradeapi_positions
         """)
         
-        # Transactions
+        # Transactions - use positions instead
         transactions = await fetch("""
             SELECT
                 COUNT(*) as total_transactions,
-                SUM(CASE WHEN type='buy' THEN 1 ELSE 0 END) as buys,
-                SUM(CASE WHEN type='sell' THEN 1 ELSE 0 END) as sells,
-                AVG(CASE WHEN fees IS NOT NULL THEN fees ELSE 0 END) as avg_fees
-            FROM tradeapi_transactions
+                SUM(CASE WHEN side='buy' THEN 1 ELSE 0 END) as buys,
+                SUM(CASE WHEN side='sell' THEN 1 ELSE 0 END) as sells,
+                0 as avg_fees
+            FROM tradeapi_positions
+            LIMIT 1
         """)
         
         # Top portfolios
