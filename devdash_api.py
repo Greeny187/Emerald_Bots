@@ -2183,55 +2183,125 @@ async def content_bot_groups_stats(request: web.Request):
         return _json({"error": str(e)}, request, status=500)
 
 
-async def content_bot_tokens_stats(request: web.Request):
-    """EMRD Token Statistiken: Verteilung, Claims, Transaktionen"""
+async def content_bot_claimed_stats(request: web.Request):
+    """EMRD Claimed Statistiken: Rewards Claims aus User-Wallets"""
     await _auth_user(request)
     try:
-        # Token Stats
-        token_data = await fetch("""
+        # Claimed rewards stats
+        claimed_data = await fetch("""
             SELECT 
-                (SELECT COALESCE(SUM(points), 0)::numeric FROM rewards_pending) as total_pending,
-                (SELECT COALESCE(SUM(amount), 0)::numeric FROM rewards_claims WHERE status='paid') as total_claimed,
+                (SELECT COALESCE(SUM(amount), 0)::numeric FROM rewards_claims WHERE status='paid') as claimed_total,
+                (SELECT COUNT(*) FROM rewards_claims WHERE status='pending') as pending_count,
                 (SELECT COALESCE(SUM(amount), 0)::numeric FROM rewards_claims WHERE status='pending') as pending_amount,
-                (SELECT COUNT(DISTINCT user_id) FROM rewards_pending WHERE points > 0) as holders_count
+                (SELECT COUNT(DISTINCT user_id) FROM rewards_claims) as unique_claimants
         """)
-        token_row = token_data[0] if token_data else {'total_pending': 0, 'total_claimed': 0, 'pending_amount': 0, 'holders_count': 0}
+        claimed_row = claimed_data[0] if claimed_data else {'claimed_total': 0, 'pending_count': 0, 'pending_amount': 0, 'unique_claimants': 0}
         
-        # Top token holders
-        holders = await fetch("""
+        # Top claimants
+        top_claimants = await fetch("""
             SELECT 
                 user_id,
-                points as balance,
-                ROUND((100.0 * points / NULLIF((SELECT SUM(points) FROM rewards_pending WHERE points > 0), 0))::numeric, 2) as percentage
-            FROM rewards_pending
-            WHERE points > 0
-            ORDER BY points DESC
+                SUM(amount)::numeric as claim_amount,
+                COUNT(*) as claim_count
+            FROM rewards_claims
+            WHERE status='paid'
+            GROUP BY user_id
+            ORDER BY claim_amount DESC
             LIMIT 20
         """)
         
         stats = {
             "timestamp": int(time.time()),
-            "EMRD": {
-                "total_distributed": float(token_row.get('total_pending') or 0),
-                "total_claimed": float(token_row.get('total_claimed') or 0),
-                "total_pending": float(token_row.get('pending_amount') or 0),
-                "holders_count": int(token_row.get('holders_count') or 0),
-                "top_holders": [
-                    {
-                        "rank": i+1,
-                        "user_id": int(h['user_id']),
-                        "balance": float(h['balance'] or 0),
-                        "percentage": float(h['percentage'] or 0)
-                    }
-                    for i, h in enumerate(holders or [])
-                ]
-            }
+            "claimed_total": float(claimed_row.get('claimed_total') or 0),
+            "pending_count": int(claimed_row.get('pending_count') or 0),
+            "pending_amount": float(claimed_row.get('pending_amount') or 0),
+            "unique_claimants": int(claimed_row.get('unique_claimants') or 0),
+            "top_claimants": [
+                {
+                    "rank": i+1,
+                    "user_id": int(c['user_id']),
+                    "claim_amount": float(c['claim_amount'] or 0),
+                    "claim_count": int(c['claim_count'])
+                }
+                for i, c in enumerate(top_claimants or [])
+            ]
         }
         
         return _json(stats, request)
     except Exception as e:
-        log.error("content_bot_tokens_stats failed: %s", e, exc_info=True)
+        log.error("content_bot_claimed_stats failed: %s", e, exc_info=True)
         return _json({"error": str(e)}, request, status=500)
+
+
+async def content_bot_story_share_stats(request: web.Request):
+    """Story Share Statistiken: Shares, Clicks, Rewards"""
+    await _auth_user(request)
+    try:
+        # Story sharing stats - wir tracken shares und rewards aus rewards_pending/claims
+        # Die rewards_pending.reason / rewards_claims.meta sollte 'story_share' enthalten
+        stats_data = await fetch("""
+            SELECT
+                (SELECT COUNT(DISTINCT chat_id) FROM global_config 
+                 WHERE key LIKE 'story_sharing:%' AND value->>'enabled' = 'true') as active_groups,
+                (SELECT COUNT(*) FROM rewards_pending WHERE reason LIKE '%story%') as total_shares,
+                (SELECT COALESCE(SUM(points), 0)::numeric FROM rewards_pending 
+                 WHERE reason LIKE '%story%') as story_share_rewards,
+                (SELECT COUNT(DISTINCT user_id) FROM rewards_pending 
+                 WHERE reason LIKE '%story%') as story_share_users,
+                (SELECT COUNT(*) FROM rewards_claims WHERE status='paid' 
+                 AND (meta->>'source' = 'story' OR description LIKE '%story%')) as claimed_story_rewards
+        """)
+        
+        # Fallback für detaillierte Daten - wenn die obige Query nicht funktioniert
+        if not stats_data or not stats_data[0]:
+            stats_data = await fetch("""
+                SELECT
+                    0 as active_groups,
+                    0 as total_shares,
+                    0 as story_share_rewards,
+                    0 as story_share_users,
+                    0 as claimed_story_rewards
+            """)
+        
+        row = stats_data[0] if stats_data else {'active_groups': 0, 'total_shares': 0, 'story_share_rewards': 0, 'story_share_users': 0, 'claimed_story_rewards': 0}
+        
+        # Get approximate clicks based on claims related to story sharing
+        clicks_data = await fetch("""
+            SELECT COUNT(*) as total_clicks
+            FROM rewards_claims 
+            WHERE status='paid' AND (meta->>'source' = 'story_click' OR description LIKE '%click%')
+            LIMIT 1
+        """)
+        clicks_row = clicks_data[0] if clicks_data else {'total_clicks': 0}
+        
+        total_shares = int(row.get('total_shares') or 0)
+        total_clicks = int(clicks_row.get('total_clicks') or 0)
+        
+        stats = {
+            "timestamp": int(time.time()),
+            "active_groups": int(row.get('active_groups') or 0),
+            "total_shares": total_shares,
+            "total_clicks": total_clicks,
+            "avg_clicks": round(float(total_clicks) / max(1, total_shares), 2),
+            "story_share_rewards": float(row.get('story_share_rewards') or 0),
+            "story_share_users": int(row.get('story_share_users') or 0),
+            "claimed_story_rewards": int(row.get('claimed_story_rewards') or 0)
+        }
+        
+        return _json(stats, request)
+    except Exception as e:
+        log.error("content_bot_story_share_stats failed: %s", e, exc_info=True)
+        # Fallback response wenn Query fehlschlägt
+        return _json({
+            "timestamp": int(time.time()),
+            "active_groups": 0,
+            "total_shares": 0,
+            "total_clicks": 0,
+            "avg_clicks": 0.0,
+            "story_share_rewards": 0.0,
+            "story_share_users": 0,
+            "claimed_story_rewards": 0
+        }, request)
 
 
 async def content_bot_ai_moderation_stats(request: web.Request):
@@ -2793,11 +2863,15 @@ def register_devdash_routes(app: web.Application):
     app.router.add_route("GET", "/api/devdash/bots/metrics",          bot_metrics)
     app.router.add_route("GET", "/api/devdash/bots/endpoints",        bot_endpoints)
     
-    # Ads (Werbungen)
-    app.router.add_route("GET", "/api/devdash/ads",                   ads_list)
-    app.router.add_post(        "/api/devdash/ads",                   ads_create)
-    app.router.add_put(         "/api/devdash/ads/{id}",              ads_update)
-    app.router.add_delete(      "/api/devdash/ads/{id}",              ads_delete)
+    # Content Bot Stats
+    app.router.add_route("GET", "/api/devdash/content/stats/overview",        content_bot_stats_overview)
+    app.router.add_route("GET", "/api/devdash/content/stats/groups",          content_bot_groups_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/claimed",         content_bot_claimed_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/story-share",     content_bot_story_share_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/ai-moderation",   content_bot_ai_moderation_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/retention",       content_bot_user_retention)
+    app.router.add_route("GET", "/api/devdash/content/stats/network",         content_bot_network_analysis)
+    app.router.add_route("GET", "/api/devdash/content/stats/complete",        content_bot_complete_stats)
     
     # Token Events
     app.router.add_route("GET", "/api/devdash/token-events",          token_events_list)
@@ -2810,9 +2884,9 @@ def register_devdash_routes(app: web.Application):
     # Content Bot Statistics
     app.router.add_route("GET", "/api/devdash/content/stats/overview",       content_bot_stats_overview)
     app.router.add_route("GET", "/api/devdash/content/stats/groups",         content_bot_groups_stats)
-    app.router.add_route("GET", "/api/devdash/content/stats/tokens",         content_bot_tokens_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/claimed",        content_bot_claimed_stats)
+    app.router.add_route("GET", "/api/devdash/content/stats/story-share",    content_bot_story_share_stats)
     app.router.add_route("GET", "/api/devdash/content/stats/ai-moderation",  content_bot_ai_moderation_stats)
-    app.router.add_route("GET", "/api/devdash/content/stats/features",       content_bot_features_stats)
     app.router.add_route("GET", "/api/devdash/content/stats/retention",      content_bot_user_retention)
     app.router.add_route("GET", "/api/devdash/content/stats/network",        content_bot_network_analysis)
     app.router.add_route("GET", "/api/devdash/content/stats/complete",       content_bot_complete_stats)
