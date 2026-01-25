@@ -914,10 +914,6 @@ async def _save_from_payload(cid:int, uid:int, data:dict, app:Application|None) 
                 cfg["payment_ton"] = bool(pro["payment_ton"])
             if "payment_ton_wallet" in pro:
                 cfg["payment_ton_wallet"] = (pro.get("payment_ton_wallet") or "").strip()
-            if "payment_coinbase" in pro:
-                cfg["payment_coinbase"] = bool(pro["payment_coinbase"])
-            if "payment_coinbase_key" in pro:
-                cfg["payment_coinbase_key"] = (pro.get("payment_coinbase_key") or "").strip()
             if "payment_paypal" in pro:
                 cfg["payment_paypal"] = bool(pro["payment_paypal"])
             if "payment_paypal_email" in pro:

@@ -1,6 +1,3 @@
-"""
-Payment handlers für miniapp - Coinbase Commerce, WalletConnect, etc.
-"""
 import logging
 import asyncio
 import json
@@ -17,14 +14,11 @@ logger = logging.getLogger(__name__)
 # Imports from shared
 try:
     from shared.payments import (
-        create_checkout, create_coinbase_charge, verify_coinbase_webhook,
-        handle_webhook, PROVIDERS, PLANS
+        create_checkout, handle_webhook, PROVIDERS, PLANS
     )
 except ImportError:
     logger.warning("[payment_handlers] Could not import shared.payments")
     def create_checkout(*args, **kwargs): return {}
-    def create_coinbase_charge(*args, **kwargs): return {}
-    def verify_coinbase_webhook(*args, **kwargs): return False
     def handle_webhook(*args, **kwargs): return False
 
 async def handle_pro_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,48 +126,6 @@ async def handle_pro_status_callback(update: Update, context: ContextTypes.DEFAU
 
 # === Webhook Handler für externe Payment-Provider ===
 
-async def route_webhook_coinbase(request: web.Request) -> web.Response:
-    """
-    Coinbase Commerce Webhook Handler.
-    POST /webhooks/coinbase mit JSON payload
-    """
-    try:
-        request_body = await request.text()
-        signature = request.headers.get("X-CC-Webhook-Signature", "")
-        
-        if not verify_coinbase_webhook(request_body, signature):
-            logger.warning("[webhook] Invalid Coinbase signature")
-            return web.Response(status=401, text="Invalid signature")
-        
-        data = json.loads(request_body)
-        event = data.get("event", {})
-        event_type = event.get("type", "")
-        charge = event.get("data", {})
-        
-        logger.info(f"[coinbase_webhook] Event: {event_type}, Charge: {charge.get('id')}")
-        
-        # Handle completed charge
-        if event_type == "charge:confirmed" or event_type == "charge:completed":
-            ok = handle_webhook("coinbase", {
-                "order_id": charge.get("metadata", {}).get("order_id"),
-                "status": "completed",
-                "charge_id": charge.get("id"),
-                "amount": charge.get("amount", {}).get("amount")
-            })
-            
-            if ok:
-                logger.info(f"[coinbase_webhook] Payment processed: {charge.get('id')}")
-                return web.Response(status=200, text="OK")
-            else:
-                logger.warning(f"[coinbase_webhook] Failed to process: {charge.get('id')}")
-                return web.Response(status=500, text="Failed to process")
-        
-        return web.Response(status=200, text="OK")
-    
-    except Exception as e:
-        logger.exception(f"[coinbase_webhook] Error: {e}")
-        return web.Response(status=500, text="Error")
-
 async def route_webhook_generic(request: web.Request) -> web.Response:
     """
     Generic webhook handler für andere Payment-Provider.
@@ -204,9 +156,6 @@ def register_payment_routes(webapp: web.Application):
     """
     Registriere Webhook Routes in der aiohttp Web App.
     """
-    from aiohttp import web
-    
-    webapp.router.add_post("/webhooks/coinbase", route_webhook_coinbase)
     webapp.router.add_post("/webhooks/{provider}", route_webhook_generic)
     
     logger.info("[payment_handlers] Payment routes registered")

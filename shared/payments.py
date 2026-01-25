@@ -1,10 +1,7 @@
 # payments.py - Zentrale Zahlungsintegration für alle Bots
-import hashlib
-import hmac
 import logging
 import os
 import uuid
-import httpx
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,7 +21,7 @@ except ImportError:
     def set_pro_until(*args, **kwargs): pass
     def get_subscription_info(*args, **kwargs): return {}
 
-WEBSITE  = "https://greeny187.github.io/GreenyManagementBots/"
+WEBSITE  = "https://greeny187.github.io/EmeraldContentBots/"
 SUPPORT  = "https://t.me/+DkUfIvjyej8zNGVi"
 TON_WALLET = os.getenv("TON_WALLET_ADDRESS", "UQBopac1WFJGC_K48T8T8...")
 
@@ -70,58 +67,6 @@ def _build_link(link_base:str, order_id:str, price:str)->str:
     sep = "&" if "?" in (link_base or "") else "?"
     return f"{link_base}{sep}ref={order_id}&amount={price}"
 
-async def create_coinbase_charge(order_id: str, price_eur: str, description: str, webhook_url: str) -> dict:
-    """
-    Erstellt eine Coinbase Commerce Charge für Zahlungen.
-    Returns: {"charge_id": "...", "hosted_url": "...", "error": None} oder {"error": "..."}
-    """
-    if not COINBASE_API_KEY:
-        logger.warning("[coinbase] API key not configured")
-        return {"error": "Coinbase not configured"}
-    
-    headers = {
-        "X-CC-Api-Key": COINBASE_API_KEY,
-        "X-CC-Version": "2018-03-22",
-        "Content-Type": "application/json"
-    }
-    
-    # Konvertiere EUR zu USD (vereinfachte Annahme: 1 EUR ≈ 1.1 USD)
-    price_usd = str(float(price_eur) * 1.1)[:5]
-    
-    payload = {
-        "name": "Emerald PRO Subscription",
-        "description": description,
-        "pricing_type": "fixed_price",
-        "local_price": {
-            "amount": price_usd,
-            "currency": "USD"
-        },
-        "metadata": {
-            "order_id": order_id,
-            "service": "emerald_pro"
-        },
-        "redirect_url": webhook_url,
-        "cancel_url": f"{webhook_url}?cancelled=1"
-    }
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(COINBASE_API_URL, json=payload, headers=headers, timeout=10.0)
-            resp.raise_for_status()
-            data = resp.json()
-            
-            charge = data.get("data", {})
-            logger.info(f"[coinbase] Created charge {order_id}: {charge.get('id')}")
-            
-            return {
-                "charge_id": charge.get("id"),
-                "hosted_url": charge.get("hosted_url"),
-                "error": None
-            }
-    except Exception as e:
-        logger.error(f"[coinbase] Failed to create charge: {e}")
-        return {"error": str(e)}
-
 def build_walletconnect_uri(provider: str, amount_eur: str, order_id: str) -> str:
     """
     Erstelle WalletConnect URI für TON Wallets.
@@ -136,10 +81,7 @@ def build_walletconnect_uri(provider: str, amount_eur: str, order_id: str) -> st
     return ""
 
 def create_checkout(chat_id: int, provider: str, plan_key: str, user_id: int, webhook_url: str = "") -> dict:
-    """
-    Erstelle einen Checkout für verschiedene Payment Provider.
-    webhook_url: für Coinbase Callback
-    """
+
     ensure_payments_schema()
     plan = PLANS.get(plan_key, {})
     if not plan:
@@ -155,19 +97,7 @@ def create_checkout(chat_id: int, provider: str, plan_key: str, user_id: int, we
     except Exception as e:
         logger.warning(f"[checkout] Failed to create payment order: {e}")
     
-    # Provider-spezifische Links
-    if provider == "coinbase":
-        # Hinweis: Coinbase ist async, sollte separat aufgerufen werden
-        return {
-            "provider": "coinbase",
-            "order_id": order_id,
-            "price": price_eur,
-            "months": months,
-            "action": "create_charge",  # Signal für Caller: async create_coinbase_charge aufrufen
-            "webhook_url": webhook_url or WEBSITE
-        }
-    
-    elif provider == "walletconnect_ton":
+    if provider == "walletconnect_ton":
         uri = build_walletconnect_uri(provider, price_eur, order_id)
         return {
             "provider": provider,
@@ -211,42 +141,20 @@ def create_checkout(chat_id: int, provider: str, plan_key: str, user_id: int, we
 
 def build_pro_menu(chat_id: int) -> InlineKeyboardMarkup:
     """Erstelle PRO Membership Menü."""
-    sub = get_subscription_info(chat_id) if callable(get_subscription_info) else {}
     kb = []
     
     for key, plan in PLANS.items():
         row = []
         for prov_key, meta in PROVIDERS.items():
-            if prov_key == "coinbase":
-                if not COINBASE_API_KEY:
-                    continue
-                row.append(InlineKeyboardButton("coinbase"))
-            elif prov_key == "walletconnect_ton":
+            if prov_key == "walletconnect_ton":
                 row.append(InlineKeyboardButton("walletconnect_ton"))
             elif prov_key == "paypal":
                 row.append(InlineKeyboardButton("paypal"))
-                if row:
-                    kb.extend([row])
+        if row:
+            kb.extend([row])
     
     kb.append([InlineKeyboardButton("🔎 Status prüfen", callback_data="pay:status")])
     return InlineKeyboardMarkup(kb)
-
-def verify_coinbase_webhook(request_body: str, signature: str) -> bool:
-    """
-    Verify Coinbase Commerce webhook signature.
-    signature: from X-CC-Webhook-Signature header
-    """
-    if not COINBASE_WEBHOOK_SECRET:
-        logger.warning("[coinbase] Webhook secret not configured")
-        return False
-    
-    expected_sig = hmac.new(
-        COINBASE_WEBHOOK_SECRET.encode(),
-        request_body.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    return hmac.compare_digest(expected_sig, signature)
 
 def handle_webhook(provider: str, data: dict) -> bool:
     """
@@ -259,14 +167,6 @@ def handle_webhook(provider: str, data: dict) -> bool:
     order_id = data.get("order_id") or data.get("ref") or data.get("metadata", {}).get("order_id")
     if not order_id:
         logger.warning(f"[webhook] No order_id found in {provider} webhook")
-        return False
-    
-    # Unterschiedliche Status-Namen
-    status = data.get("status", "").lower()
-    
-    # Coinbase nutzt "COMPLETED"
-    if provider == "coinbase" and status != "completed":
-        logger.info(f"[webhook] Coinbase charge not completed: {status}")
         return False
     
     # Markiere als bezahlt

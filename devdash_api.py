@@ -2848,9 +2848,9 @@ async def affiliate_bot_stats(request: web.Request):
         referrers = await fetch("""
             SELECT
                 COUNT(DISTINCT referrer_id) as total_referrers,
-                COUNT(DISTINCT referred_user_id) as total_referrals,
-                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as conversions_total,
-                COUNT(DISTINCT CASE WHEN status='completed' THEN referred_user_id END) as converted_referrals
+                COUNT(DISTINCT referral_id) as total_referrals,
+                SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as conversions_total,
+                COUNT(DISTINCT CASE WHEN status='active' THEN referral_id END) as converted_referrals
             FROM aff_referrals
         """)
         
@@ -2996,9 +2996,9 @@ async def dao_bot_stats(request: web.Request):
         # Voting
         voting = await fetch("""
             SELECT
-                COUNT(DISTINCT user_id) as total_voters,
+                COUNT(DISTINCT voter_id) as total_voters,
                 COUNT(*) as total_votes,
-                AVG(CASE WHEN power IS NOT NULL THEN power ELSE 0 END) as avg_voting_power
+                AVG(CASE WHEN voting_power IS NOT NULL THEN voting_power ELSE 0 END) as avg_voting_power
             FROM dao_votes
         """)
         
@@ -3077,7 +3077,7 @@ async def learning_bot_stats(request: web.Request):
         courses = await fetch("""
             SELECT
                 COUNT(*) as total_courses,
-                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_courses
+                COUNT(*) as active_courses
             FROM learning_courses
         """)
         
@@ -3165,9 +3165,9 @@ async def support_bot_stats(request: web.Request):
         tickets = await fetch("""
             SELECT
                 COUNT(*) as total_tickets,
-                SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open,
-                SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
-                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status IN ('neu', 'in_bearbeitung') THEN 1 ELSE 0 END) as open,
+                SUM(CASE WHEN status='geloest' THEN 1 ELSE 0 END) as closed,
+                SUM(CASE WHEN status='warten' THEN 1 ELSE 0 END) as pending,
                 AVG(EXTRACT(EPOCH FROM (closed_at - created_at))/3600) as avg_resolution_hours
             FROM support_tickets
         """)
@@ -3236,7 +3236,7 @@ async def trade_api_bot_stats(request: web.Request):
             SELECT
                 COUNT(DISTINCT user_id) as total_users,
                 COUNT(*) as total_portfolios,
-                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_portfolios,
+                COUNT(*) as active_portfolios,
                 SUM(CASE WHEN total_value IS NOT NULL THEN total_value ELSE 0 END) as total_aum
             FROM tradeapi_portfolios
         """)
@@ -3311,7 +3311,7 @@ async def trade_dex_bot_stats(request: web.Request):
         # DEX config
         dex_config = await fetch("""
             SELECT
-                COUNT(DISTINCT dex_name) as total_dexes
+                COUNT(DISTINCT name) as total_dexes
             FROM tradedex_dex_config
         """)
         
@@ -3319,7 +3319,7 @@ async def trade_dex_bot_stats(request: web.Request):
         pools = await fetch("""
             SELECT
                 COUNT(*) as total_pools,
-                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_pools,
+                COUNT(*) as active_pools,
                 SUM(CASE WHEN tvl_usd IS NOT NULL THEN tvl_usd ELSE 0 END) as total_tvl_usd
             FROM tradedex_pools
         """)
@@ -3329,7 +3329,7 @@ async def trade_dex_bot_stats(request: web.Request):
             SELECT
                 COUNT(DISTINCT user_id) as lp_users,
                 COUNT(*) as total_positions,
-                SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) as active_lp_positions
+                COUNT(*) as active_lp_positions
             FROM tradedex_positions
         """)
         
@@ -3345,13 +3345,12 @@ async def trade_dex_bot_stats(request: web.Request):
         # Top pools by TVL
         top_pools = await fetch("""
             SELECT
-                pool_id,
+                id as pool_id,
                 token_a,
                 token_b,
                 tvl_usd,
-                (SELECT COUNT(*) FROM tradedex_positions WHERE pool_id=tradedex_pools.pool_id) as lp_count
+                (SELECT COUNT(*) FROM tradedex_positions WHERE pool_id=tradedex_pools.id) as lp_count
             FROM tradedex_pools
-            WHERE is_active=true
             ORDER BY tvl_usd DESC
             LIMIT 10
         """)
