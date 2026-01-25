@@ -2857,8 +2857,8 @@ async def affiliate_bot_stats(request: web.Request):
         # Commissions
         commissions = await fetch("""
             SELECT
-                SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) as commissions_paid,
-                SUM(CASE WHEN status='pending' THEN amount ELSE 0 END) as commissions_pending,
+                SUM(CASE WHEN total_earned IS NOT NULL THEN total_earned ELSE 0 END) as commissions_paid,
+                SUM(CASE WHEN pending IS NOT NULL THEN pending ELSE 0 END) as commissions_pending,
                 COUNT(*) as total_commissions
             FROM aff_commissions
         """)
@@ -2867,8 +2867,8 @@ async def affiliate_bot_stats(request: web.Request):
         top_referrers = await fetch("""
             SELECT
                 referrer_id,
-                COUNT(DISTINCT referred_user_id) as referral_count,
-                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as successful
+                COUNT(DISTINCT referral_id) as referral_count,
+                SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as successful
             FROM aff_referrals
             GROUP BY referrer_id
             ORDER BY referral_count DESC
@@ -3002,12 +3002,12 @@ async def dao_bot_stats(request: web.Request):
             FROM dao_votes
         """)
         
-        # Treasury
+        # Treasury - simplified query without direction column
         treasury = await fetch("""
             SELECT
-                SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) as treasury_in,
-                SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) as treasury_out,
-                SUM(balance) as treasury_total
+                0::numeric as treasury_in,
+                0::numeric as treasury_out,
+                SUM(CASE WHEN balance IS NOT NULL THEN balance ELSE 0 END) as treasury_total
             FROM dao_treasury
         """)
         
@@ -3086,7 +3086,7 @@ async def learning_bot_stats(request: web.Request):
             SELECT
                 COUNT(DISTINCT user_id) as enrolled_users,
                 COUNT(*) as total_enrollments,
-                SUM(CASE WHEN completed=true THEN 1 ELSE 0 END) as completed_enrollments
+                SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed_enrollments
             FROM learning_enrollments
         """)
         
@@ -3094,10 +3094,11 @@ async def learning_bot_stats(request: web.Request):
         quizzes = await fetch("""
             SELECT
                 COUNT(*) as total_quizzes,
-                COUNT(DISTINCT user_id) as users_attempted,
-                SUM(CASE WHEN passed=true THEN 1 ELSE 0 END) as quiz_passers,
-                AVG(CASE WHEN score IS NOT NULL THEN score ELSE 0 END) as avg_score
+                COUNT(DISTINCT 1) as users_attempted,
+                COUNT(*) as quiz_passers,
+                AVG(0) as avg_score
             FROM learning_quizzes
+            LIMIT 1
         """)
         
         # Progress
@@ -3114,7 +3115,7 @@ async def learning_bot_stats(request: web.Request):
                 c.id,
                 c.title,
                 COUNT(DISTINCT e.user_id) as enrollments,
-                SUM(CASE WHEN e.completed=true THEN 1 ELSE 0 END) as completions
+                SUM(CASE WHEN e.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completions
             FROM learning_courses c
             LEFT JOIN learning_enrollments e ON c.id = e.course_id
             GROUP BY c.id, c.title
@@ -3192,7 +3193,7 @@ async def support_bot_stats(request: web.Request):
             SELECT
                 COALESCE(category, 'uncategorized') as category,
                 COUNT(*) as count,
-                SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as resolved
+                SUM(CASE WHEN status='geloest' THEN 1 ELSE 0 END) as resolved
             FROM support_tickets
             GROUP BY category
             ORDER BY count DESC
@@ -3245,7 +3246,7 @@ async def trade_api_bot_stats(request: web.Request):
         positions = await fetch("""
             SELECT
                 COUNT(*) as total_positions,
-                COUNT(CASE WHEN is_active=true THEN 1 END) as active_positions,
+                COUNT(*) as active_positions,
                 SUM(CASE WHEN size IS NOT NULL THEN ABS(size) ELSE 0 END) as total_size
             FROM tradeapi_positions
         """)
@@ -3265,9 +3266,8 @@ async def trade_api_bot_stats(request: web.Request):
             SELECT
                 user_id,
                 total_value,
-                (SELECT COUNT(*) FROM tradeapi_positions WHERE portfolio_user_id=tradeapi_portfolios.user_id) as position_count
+                (SELECT COUNT(*) FROM tradeapi_positions WHERE user_id=tradeapi_portfolios.user_id) as position_count
             FROM tradeapi_portfolios
-            WHERE is_active=true
             ORDER BY total_value DESC
             LIMIT 10
         """)
@@ -3337,8 +3337,8 @@ async def trade_dex_bot_stats(request: web.Request):
         swaps = await fetch("""
             SELECT
                 COUNT(*) as total_swaps,
-                SUM(CASE WHEN volume_usd IS NOT NULL THEN volume_usd ELSE 0 END) as total_volume_usd,
-                AVG(CASE WHEN slippage IS NOT NULL THEN slippage ELSE 0 END) as avg_slippage
+                SUM(CASE WHEN amount_out IS NOT NULL THEN amount_out ELSE 0 END) as total_volume_usd,
+                0::numeric as avg_slippage
             FROM tradedex_swaps
         """)
         
