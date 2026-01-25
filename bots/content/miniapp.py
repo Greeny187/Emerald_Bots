@@ -175,6 +175,77 @@ async def route_apply_preflight(request):
 async def route_file_preflight(request):
     return await _cors_ok(request)
 
+@routes.options('/miniapp/ads')
+async def route_ads_preflight(request):
+    return await _cors_ok(request)
+
+@routes.get('/miniapp/ads')
+async def route_ads(request: web.Request):
+    """Gibt aktive AD-Kampagnen für das Miniapp-Banner zurück.
+    Antwortformat (Frontend-kompatibel): { ok:true, ads:[{title, text, url, badge, icon}] }
+    SECURITY: initData ist Pflicht (oder ALLOW_BROWSER_DEV) + optionaler Admin-Check wenn cid gesetzt ist.
+    """
+    app = request.app
+    uid = _resolve_uid(request)
+    if uid <= 0:
+        return _cors_json({"ok": False, "ads": []}, 403)
+
+    # Optional: wenn cid mitgegeben, nur Admins dieser Gruppe dürfen Ads abrufen
+    cid_raw = request.query.get("cid", "") or "0"
+    try:
+        cid = int(cid_raw)
+    except Exception:
+        cid = 0
+
+    if cid and not await _is_admin(app, cid, uid):
+        return _cors_json({"ok": False, "ads": []}, 403)
+
+    try:
+        db = _db()
+        func = db.get("list_active_campaigns")
+        if not func:
+            return _cors_json({"ok": True, "ads": []})
+
+        rows = func() or []
+        ads = []
+        for r in rows:
+            # tuple: (campaign_id, title, body_text, media_url, link_url, cta_label, weight)
+            if isinstance(r, dict):
+                title = r.get("title") or "Werbung"
+                text = r.get("body_text") or r.get("text") or ""
+                url = r.get("link_url") or r.get("url") or ""
+                cta = r.get("cta_label") or "AD"
+            else:
+                title = (r[1] if len(r) > 1 else None) or "Werbung"
+                text = (r[2] if len(r) > 2 else None) or ""
+                url = (r[4] if len(r) > 4 else None) or ""
+                cta = (r[5] if len(r) > 5 else None) or "AD"
+
+            url = (url or "").strip()
+            if not url:
+                continue
+
+            # Icon/Badge heuristisch: wenn Titel mit Emoji beginnt, nutze es als Icon
+            icon = "🟢"
+            t = (title or "").strip()
+            if t and len(t) >= 2 and t[0] in "💎🚀🆘💳🟢🔥✨📊":
+                icon = t[0]
+                t = t[1:].lstrip(" -–—|")
+                title = t or title
+
+            ads.append({
+                "icon": icon,
+                "title": title,
+                "text": text,
+                "badge": cta or "AD",
+                "url": url
+            })
+
+        return _cors_json({"ok": True, "ads": ads})
+    except Exception as e:
+        logger.error(f"[miniapp/ads] Exception: {e}", exc_info=True)
+        return _cors_json({"ok": True, "ads": []})
+
 @routes.get('/miniapp/groups')
 async def route_groups(request: web.Request):
     """
@@ -1048,7 +1119,7 @@ def _db():
             get_link_settings, set_link_settings, get_spam_policy, set_spam_policy, get_spam_policy_topic, set_spam_policy_topic,
             list_spam_policy_topics, delete_spam_policy_topic,
             list_forum_topics, sync_user_topic_names, list_user_topics, effective_spam_policy,
-            assign_topic, remove_topic, 
+            assign_topic, remove_topic, list_active_campaigns,
             get_rss_topic, set_rss_topic_for_group_feeds, add_rss_feed, remove_rss_feed, set_rss_feed_options, list_rss_feeds,
             get_ai_settings, set_ai_settings, upsert_faq, delete_faq,
             set_daily_stats, is_daily_stats_enabled, get_top_responders, get_agg_rows,
@@ -1090,12 +1161,10 @@ def _db():
             "list_forum_topics": list_forum_topics,
             "assign_topic": assign_topic,
             "remove_topic": remove_topic,
-            "list_forum_topics": list_forum_topics,
             "sync_user_topic_names": sync_user_topic_names,
             "list_user_topics": list_user_topics,
-            "delete_spam_policy_topic": delete_spam_policy_topic,
             "effective_spam_policy": effective_spam_policy,
-            "list_user_topics": list_user_topics,
+            "list_active_campaigns": list_active_campaigns,
             "set_rss_topic": set_rss_topic_for_group_feeds,
             "get_rss_topic": get_rss_topic,
             "add_rss_feed": add_rss_feed,
@@ -1130,10 +1199,8 @@ def _db():
             "set_pro_until": set_pro_until,
             "get_global_config": get_global_config,
             "set_global_config": set_global_config,
-            "list_forum_topics": list_forum_topics,
             "count_forum_topics": count_forum_topics,
             "upsert_forum_topic": upsert_forum_topic,
-            "list_user_topics": list_user_topics,
             "sync_user_topic_names": sync_user_topic_names,
         }
     except ImportError as e:
