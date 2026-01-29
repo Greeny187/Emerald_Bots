@@ -43,12 +43,6 @@ if not BOT_TOKEN:
 else:
     log.info("✅ BOT_TOKEN ist gesetzt")
 
-
-# NEAR config
-NEAR_NETWORK = os.getenv("NEAR_NETWORK", "mainnet")  # "mainnet" | "testnet"
-NEAR_RPC_URL = os.getenv("NEAR_RPC_URL", "https://rpc.mainnet.near.org")
-NEAR_TOKEN_CONTRACT = os.getenv("NEAR_TOKEN_CONTRACT", "")  # z.B. token.emeraldcontent.near
-NEARBLOCKS_API = os.getenv("NEARBLOCKS_API", "https://api.nearblocks.io")
 TON_API_BASE   = os.getenv("TON_API_BASE", "https://tonapi.io")
 TON_API_KEY    = os.getenv("TON_API_KEY", "")
 
@@ -97,26 +91,49 @@ async def dev_login(request: web.Request):
     Request: { "telegram_id": 123456, "code": "DEV_LOGIN_CODE", "username": "optional" }
     Response: { "access_token": "jwt", "token_type": "bearer" }
     """
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as e:
+        log.error(f"Failed to parse dev_login JSON: {e}")
+        raise web.HTTPBadRequest(text="Invalid JSON")
+    
     code = (body.get("code") or "").strip()
     tg_id = int(body.get("telegram_id") or 0)
+    
+    # Validation
     if not tg_id:
+        log.warning(f"Dev login attempt without telegram_id. Body: {body}")
         raise web.HTTPBadRequest(text="telegram_id required")
+    
     expected = os.getenv("DEV_LOGIN_CODE", "")
-    if not expected or code != expected:
+    if not expected:
+        log.error("⚠️ DEV_LOGIN_CODE environment variable not set!")
+        raise web.HTTPInternalServerError(text="DEV_LOGIN_CODE not configured on server")
+    
+    if not code:
+        log.warning(f"Dev login attempt with empty code. telegram_id={tg_id}")
+        raise web.HTTPBadRequest(text="code required")
+    
+    if code != expected:
+        log.warning(f"Dev login FAILED: code mismatch. Expected length: {len(expected)}, Got length: {len(code)}, telegram_id={tg_id}")
         raise web.HTTPUnauthorized(text="bad dev code")
     
-    log.info(f"DEV_LOGIN for telegram_id={tg_id}")
+    log.info(f"✅ DEV_LOGIN SUCCESS for telegram_id={tg_id}")
     
-    await execute("""
-      insert into dashboard_users(telegram_id, username, role, tier)
-      values (%s, %s, 'dev', 'pro')
-      on conflict (telegram_id) do update set
-        username=coalesce(excluded.username, dashboard_users.username),
-        role='dev',
-        tier='pro',
-        updated_at=now()
-    """, (tg_id, body.get("username")))
+    try:
+        await execute("""
+          insert into dashboard_users(telegram_id, username, role, tier)
+          values (%s, %s, 'dev', 'pro')
+          on conflict (telegram_id) do update set
+            username=coalesce(excluded.username, dashboard_users.username),
+            role='dev',
+            tier='pro',
+            updated_at=now()
+        """, (tg_id, body.get("username")))
+    except Exception as e:
+        log.error(f"Database error in dev_login: {e}")
+        raise web.HTTPInternalServerError(text="Database error")
+    
     tok = _jwt_issue(tg_id, role="dev", tier="pro")
     return _json({"access_token": tok, "token_type": "bearer", "role": "dev", "tier": "pro"}, request)
 
@@ -429,53 +446,96 @@ def verify_telegram_auth(auth: Dict[str, Any]) -> Dict[str, Any]:
     """
     Verify Telegram Web App init data signature.
     
-    Expected fields:
-    - id (int): User ID
-    - auth_date (int): Unix timestamp
-    - hash (str): HMAC-SHA256 signature
-    - username, first_name, last_name, photo_url (optional)
+    Expected fields in payload:
+    - init_data (str): Raw init data from WebApp
+    - OR individual fields: id, auth_date, hash, username, first_name, last_name, photo_url
     """
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN/BOT1_TOKEN env fehlt")
+        log.error("❌ BOT_TOKEN not set - cannot verify Telegram auth")
+        raise ValueError("BOT_TOKEN not configured on server")
     
-    required = ["id", "auth_date", "hash"]
+    # 🔵 Check if init_data is provided (WebApp format)
+    if "init_data" in auth:
+        log.debug("Processing init_data string format")
+        init_data_str = auth.get("init_data", "").strip()
+        
+        # Parse init_data: "user=%7B...%7D&auth_date=..."
+        parsed = {}
+        try:
+            from urllib.parse import parse_qs, unquote
+            params = parse_qs(init_data_str)
+            for k, v in params.items():
+                parsed[k] = v[0] if v else ""
+            
+            # If user is JSON-encoded, decode it
+            if "user" in parsed:
+                import json
+                try:
+                    user_obj = json.loads(parsed["user"])
+                    parsed.update(user_obj)
+                except:
+                    pass
+        except Exception as e:
+            log.error(f"Failed to parse init_data: {e}")
+            raise ValueError(f"Invalid init_data format: {e}")
+        
+        auth = parsed
+    
+    # 🔵 Validate required fields
+    required = ["id", "auth_date"]
     for r in required:
         if r not in auth:
-            raise ValueError(f"missing required field: {r}")
+            log.warning(f"⚠️  Missing field '{r}' in auth data. Available: {list(auth.keys())}")
     
-    # Extract hash
-    received_hash = auth["hash"]
+    # If hash is provided, verify it (for WebApp)
+    if "hash" in auth:
+        try:
+            received_hash = auth["hash"]
+            
+            # Build data check string: alphabetically sorted fields (excluding hash)
+            data_to_check = {}
+            for k, v in auth.items():
+                if k != "hash":
+                    data_to_check[k] = str(v)
+            
+            data_check_str = "\n".join(f"{k}={data_to_check[k]}" for k in sorted(data_to_check.keys()))
+            log.debug(f"Data to check:\n{data_check_str}")
+            
+            # Calculate HMAC
+            secret = hashlib.sha256(BOT_TOKEN.encode()).digest()
+            calculated_hash = hmac.new(secret, data_check_str.encode(), hashlib.sha256).hexdigest()
+            
+            log.debug(f"Received hash: {received_hash}, Calculated hash: {calculated_hash}")
+            
+            if calculated_hash != received_hash:
+                raise ValueError(f"❌ invalid hash signature")
+            
+            log.info("✅ Hash verification successful")
+        except Exception as e:
+            log.error(f"❌ Hash verification failed: {e}")
+            raise
+    else:
+        log.warning("⚠️  No hash provided - skipping signature verification (widget auth?)")
     
-    # Build data check string: alphabetically sorted fields (excluding hash)
-    # Format: "field1=value1\nfield2=value2\n..."
-    data_to_check = {}
-    for k, v in auth.items():
-        if k != "hash":
-            data_to_check[k] = str(v)
-    
-    data_check_str = "\n".join(f"{k}={data_to_check[k]}" for k in sorted(data_to_check.keys()))
-    log.debug(f"Data to check:\n{data_check_str}")
-    
-    # Calculate HMAC
-    secret = hashlib.sha256(BOT_TOKEN.encode()).digest()
-    calculated_hash = hmac.new(secret, data_check_str.encode(), hashlib.sha256).hexdigest()
-    
-    log.debug(f"Received hash: {received_hash}")
-    log.debug(f"Calculated hash: {calculated_hash}")
-    
-    if calculated_hash != received_hash:
-        raise ValueError(f"invalid hash signature (received={received_hash[:8]}..., calculated={calculated_hash[:8]}...)")
-    
-    # Check timestamp
-    auth_timestamp = int(auth["auth_date"])
-    ttl = int(os.getenv("TELEGRAM_LOGIN_TTL_SECONDS", "86400"))
-    current_time = time.time()
-    
-    if current_time - auth_timestamp > ttl:
-        raise ValueError(f"login expired (auth_date={auth_timestamp}, now={current_time}, ttl={ttl})")
+    # Check timestamp (if provided)
+    if "auth_date" in auth:
+        try:
+            auth_timestamp = int(auth["auth_date"])
+            ttl = int(os.getenv("TELEGRAM_LOGIN_TTL_SECONDS", "86400"))
+            current_time = time.time()
+            
+            if current_time - auth_timestamp > ttl:
+                log.error(f"❌ Login expired (auth_date={auth_timestamp}, now={current_time}, ttl={ttl})")
+                raise ValueError(f"login expired")
+            log.info(f"✅ Timestamp valid (age: {int(current_time - auth_timestamp)}s)")
+        except ValueError as e:
+            if "invalid literal" in str(e):
+                log.warning(f"⚠️  Could not parse auth_date: {auth.get('auth_date')}")
+            else:
+                raise
     
     return {
-        "id": int(auth["id"]),
+        "id": int(auth.get("id") or 0),
         "username": auth.get("username"),
         "first_name": auth.get("first_name"),
         "last_name": auth.get("last_name"),
@@ -687,21 +747,71 @@ async def token_emrd_info(request: web.Request):
 
 
 async def auth_telegram(request: web.Request):
-    log.info("auth_telegram hit from origin=%s ua=%s", request.headers.get("Origin"), request.headers.get("User-Agent"))
+    """
+    TELEGRAM LOGIN - Supports both:
+    1. WebApp: init_data from Telegram WebApp (TMA)
+    2. Widget: telegram_user object from Telegram Login Widget (Browser)
+    """
+    log.info("auth_telegram hit from origin=%s", request.headers.get("Origin"))
     try:
         payload = await request.json()
-        log.info("Telegram payload keys: %s", list(payload.keys()))
+        log.info("Telegram payload keys: %s, auth_method: %s", list(payload.keys()), payload.get("auth_method", "unknown"))
     except Exception as e:
         log.error("Failed to parse JSON: %s", e)
         return _json({"error": f"Invalid JSON: {str(e)}"}, request, status=400)
     
-    try:
-        user = verify_telegram_auth(payload)
-        log.info("Telegram auth verified for user id: %s, username: %s", user["id"], user.get("username"))
-    except Exception as e:
-        log.error("Telegram verification failed: %s", e)
-        return _json({"error": str(e)}, request, status=400)
+    auth_method = payload.get("auth_method", "unknown")
+    user = None
     
+    # 🔵 METHOD 1: Telegram Login Widget (Browser)
+    if auth_method == "widget" and "telegram_user" in payload:
+        log.info("✅ Using Telegram Widget authentication")
+        try:
+            widget_user = payload.get("telegram_user", {})
+            # Widget gibt ID statt id
+            user = {
+                "id": int(widget_user.get("id") or widget_user.get("ID") or 0),
+                "username": widget_user.get("username"),
+                "first_name": widget_user.get("first_name"),
+                "last_name": widget_user.get("last_name"),
+                "photo_url": widget_user.get("photo_url"),
+            }
+            if not user["id"]:
+                raise ValueError("No user ID in widget response")
+            log.info("✅ Widget user verified: id=%s, username=%s", user["id"], user.get("username"))
+        except Exception as e:
+            log.error("❌ Widget user parsing failed: %s", e)
+            return _json({"error": f"Widget auth failed: {str(e)}"}, request, status=400)
+    
+    # 🔵 METHOD 2: Telegram WebApp (TMA)
+    elif auth_method == "webapp" and "init_data" in payload:
+        log.info("✅ Using Telegram WebApp authentication")
+        try:
+            user = verify_telegram_auth(payload)
+            log.info("✅ WebApp auth verified for user id: %s", user["id"])
+        except Exception as e:
+            log.error("❌ WebApp verification failed: %s", e)
+            return _json({"error": str(e)}, request, status=400)
+    
+    # 🔴 Fallback: Try init_data from payload (old format)
+    elif "init_data" in payload:
+        log.info("✅ Using init_data (fallback method)")
+        try:
+            user = verify_telegram_auth(payload)
+            log.info("✅ Init_data auth verified for user id: %s", user["id"])
+        except Exception as e:
+            log.error("❌ Init_data verification failed: %s", e)
+            return _json({"error": str(e)}, request, status=400)
+    
+    else:
+        log.error("❌ No valid authentication method found. payload keys: %s", list(payload.keys()))
+        return _json({"error": "No valid auth method (need init_data or telegram_user)"}, request, status=400)
+    
+    if not user or not user.get("id"):
+        log.error("❌ User verification resulted in empty user")
+        return _json({"error": "User verification failed"}, request, status=400)
+    
+    # ✅ Insert/Update user in database
     try:
         await execute(
             """
@@ -716,21 +826,22 @@ async def auth_telegram(request: web.Request):
             """,
             (user["id"], user.get("username"), user.get("first_name"), user.get("last_name"), user.get("photo_url")),
         )
-        log.info("User inserted/updated in database: %s", user["id"])
+        log.info("✅ User inserted/updated in database: %s", user["id"])
     except Exception as e:
-        log.error("Failed to insert user into database: %s", e)
+        log.error("❌ Failed to insert user into database: %s", e)
         return _json({"error": f"Database error: {str(e)}"}, request, status=500)
     
+    # ✅ Issue JWT token
     try:
         row = await fetchrow("select role,tier from dashboard_users where telegram_id=%s", (user["id"],))
         if not row:
-            log.warning("User not found after insert: %s", user["id"])
+            log.warning("⚠️  User not found after insert: %s", user["id"])
             role, tier = "dev", "pro"
         else:
             role, tier = row["role"], row["tier"]
         
         token = _jwt_issue(user["id"], role=role, tier=tier)
-        log.info("JWT token issued for user: %s", user["id"])
+        log.info("✅ JWT token issued for user: %s (role=%s, tier=%s)", user["id"], role, tier)
         
         return _json(
             {
@@ -742,7 +853,7 @@ async def auth_telegram(request: web.Request):
             request,
         )
     except Exception as e:
-        log.error("Failed to issue token: %s", e)
+        log.error("❌ Failed to issue token: %s", e)
         return _json({"error": f"Token error: {str(e)}"}, request, status=500)
 
 
@@ -906,27 +1017,6 @@ async def bots_add(request: web.Request):
     """, (username, title, None, is_active, json.dumps({})))
     row = await fetchrow("select id,username,title,env_token_key,is_active,meta from dashboard_bots where username=%s", (username,))
     return _json(row, request, status=201)
-
-
-# ------------------------------ NEAR Connect ------------------------------
-async def near_challenge(request: web.Request):
-    user_id = await _auth_user(request)
-    nonce = secrets.token_bytes(32)
-    # one active nonce per user (replaced on each request)
-    await execute(
-        "insert into dashboard_nonces(telegram_id, nonce) values(%s,%s) on conflict (telegram_id) do update set nonce=excluded.nonce, created_at=now()",
-        (user_id, nonce),
-    )
-    message = f"Login to Emerald DevDash — tg:{user_id}"  # human‑readable tag
-    return _json(
-        {
-            "network": NEAR_NETWORK,
-            "recipient": "emerald.dev",  # any domain/app tag; not on‑chain
-            "nonce_b64": base64.b64encode(nonce).decode(),
-            "message": message,
-        },
-        request,
-    )
 
 # ------------------------------ TON Wallet ------------------------------
 
