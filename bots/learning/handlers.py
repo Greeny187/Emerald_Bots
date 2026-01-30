@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppI
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler, Application
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.learning.handlers")
 
 MINIAPP_URL = os.getenv(
     "MINIAPP_URL",
@@ -31,6 +31,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Willkommensbefehl"""
     user = update.effective_user
     chat = update.effective_chat
+    logger.info(f"[CMD_START] user={user.id} chat_type={chat.type}")
     
     if chat.type == "private":
         await update.message.reply_text(
@@ -69,16 +70,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List available courses"""
+    user = update.effective_user
+    logger.info(f"[CMD_COURSES] user={user.id}")
+    
     if not database:
+        logger.warning("[CMD_COURSES] Database connection unavailable")
         await update.message.reply_text("⚠️ Datenbankverbindung fehlt")
         return
     
     try:
+        logger.debug("[CMD_COURSES] Fetching courses by level...")
         courses_by_level = {
             "beginner": database.get_all_courses("beginner"),
             "intermediate": database.get_all_courses("intermediate"),
             "advanced": database.get_all_courses("advanced")
         }
+        logger.debug(f"[CMD_COURSES] Courses fetched: beginner={len(courses_by_level.get('beginner', []))} intermediate={len(courses_by_level.get('intermediate', []))} advanced={len(courses_by_level.get('advanced', []))}")
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(
@@ -102,7 +109,7 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Error in cmd_courses: {e}")
+        logger.error(f"[CMD_COURSES] Error: {e}", exc_info=True)
         await update.message.reply_text("❌ Fehler beim Laden der Kurse")
 
 
@@ -111,13 +118,17 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's learning progress"""
     user = update.effective_user
+    logger.info(f"[CMD_PROGRESS] user={user.id}")
     
     if not database:
+        logger.warning("[CMD_PROGRESS] Database connection unavailable")
         await update.message.reply_text("⚠️ Datenbankverbindung fehlt")
         return
     
     try:
+        logger.debug(f"[CMD_PROGRESS] Fetching stats for {user.id}")
         stats = database.get_course_stats(user.id)
+        logger.debug(f"[CMD_PROGRESS] Stats: {stats}")
         
         progress_text = f"""
 📊 **Dein Lernfortschritt**
@@ -140,7 +151,7 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(progress_text, reply_markup=keyboard, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in cmd_progress: {e}")
+        logger.error(f"[CMD_PROGRESS] Error: {e}", exc_info=True)
         await update.message.reply_text("❌ Fehler beim Laden des Fortschritts")
 
 
@@ -149,13 +160,16 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show learning rewards"""
     user = update.effective_user
+    logger.info(f"[CMD_REWARDS] user={user.id}")
     
     if not database:
+        logger.warning("[CMD_REWARDS] Database connection unavailable")
         await update.message.reply_text("⚠️ Datenbankverbindung fehlt")
         return
     
     try:
         # Get unclaimed rewards
+        logger.debug(f"[CMD_REWARDS] Fetching rewards for {user.id}")
         stats = database.get_course_stats(user.id)
         
         rewards_text = f"""
@@ -187,7 +201,7 @@ async def cmd_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(rewards_text, reply_markup=keyboard, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in cmd_rewards: {e}")
+        logger.error(f"[CMD_REWARDS] Error: {e}", exc_info=True)
         await update.message.reply_text("❌ Fehler beim Laden der Belohnungen")
 
 
@@ -196,12 +210,15 @@ async def cmd_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user achievements"""
     user = update.effective_user
+    logger.info(f"[CMD_ACHIEVEMENTS] user={user.id}")
     
     if not database:
+        logger.warning("[CMD_ACHIEVEMENTS] Database connection unavailable")
         await update.message.reply_text("⚠️ Datenbankverbindung fehlt")
         return
     
     try:
+        logger.debug(f"[CMD_ACHIEVEMENTS] Fetching achievements for {user.id}")
         achievements = database.get_user_achievements(user.id)
         
         if not achievements:
@@ -220,7 +237,7 @@ async def cmd_achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(achievements_text, reply_markup=keyboard, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in cmd_achievements: {e}")
+        logger.error(f"[CMD_ACHIEVEMENTS] Error: {e}", exc_info=True)
         await update.message.reply_text("❌ Fehler beim Laden der Achievements")
 
 
@@ -228,6 +245,7 @@ async def cmd_achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help"""
+    logger.info(f"[CMD_HELP] user={update.effective_user.id}")
     help_text = """
 📚 **Learning Bot - Hilfe**
 
@@ -269,6 +287,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Button callbacks"""
     query = update.callback_query
     await query.answer()
+    
+    user = query.from_user
+    logger.info(f"[BUTTON_CALLBACK] user={user.id} data={query.data}")
     
     if query.data == "learning_help":
         await cmd_help(update, context)
@@ -362,20 +383,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def register_handlers(app: Application):
     """Register all handlers"""
-    # Commands
-    app.add_handler(CommandHandler("start", cmd_start), group=0)
-    app.add_handler(CommandHandler("learning", cmd_start), group=0)
-    app.add_handler(CommandHandler("academy", cmd_start), group=0)
-    app.add_handler(CommandHandler("courses", cmd_courses), group=0)
-    app.add_handler(CommandHandler("progress", cmd_progress), group=0)
-    app.add_handler(CommandHandler("rewards", cmd_rewards), group=0)
-    app.add_handler(CommandHandler("achievements", cmd_achievements), group=0)
-    app.add_handler(CommandHandler("help", cmd_help), group=0)
-    
-    # Callbacks
-    app.add_handler(CallbackQueryHandler(button_callback), group=1)
-    
-    # Text messages
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler), group=2)
-    
-    logger.info("Learning handlers registered")
+    logger.info("[REGISTER] Registering learning handlers...")
+    try:
+        # Commands
+        app.add_handler(CommandHandler("start", cmd_start), group=0)
+        app.add_handler(CommandHandler("learning", cmd_start), group=0)
+        app.add_handler(CommandHandler("academy", cmd_start), group=0)
+        app.add_handler(CommandHandler("courses", cmd_courses), group=0)
+        app.add_handler(CommandHandler("progress", cmd_progress), group=0)
+        app.add_handler(CommandHandler("rewards", cmd_rewards), group=0)
+        app.add_handler(CommandHandler("achievements", cmd_achievements), group=0)
+        app.add_handler(CommandHandler("help", cmd_help), group=0)
+        logger.debug("[REGISTER] Command handlers registered")
+        
+        # Callbacks
+        app.add_handler(CallbackQueryHandler(button_callback), group=1)
+        
+        # Text messages
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler), group=2)
+        
+        logger.info("✅ [REGISTER] Learning handlers registered successfully")
+    except Exception as e:
+        logger.error(f"❌ [REGISTER] Failed to register handlers: {e}", exc_info=True)

@@ -5,28 +5,33 @@ import psycopg2
 from datetime import datetime
 import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.affiliate.database")
 
 
 def get_connection():
     """Get database connection"""
     try:
-        return psycopg2.connect(os.getenv("DATABASE_URL"))
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        logger.debug("[DB_CONNECT] Database connection established")
+        return conn
     except Exception as e:
-        logger.error(f"DB connection error: {e}")
+        logger.error(f"[DB_CONNECT] Database connection error: {e}", exc_info=True)
         return None
 
 
 def init_all_schemas():
     """Initialize all database schemas"""
+    logger.info("[DB_SCHEMA] Initializing affiliate database schemas...")
     conn = get_connection()
     if not conn:
+        logger.error("[DB_SCHEMA] Failed to get database connection")
         return False
     
     try:
         cur = conn.cursor()
         
         # Referrals table
+        logger.debug("[DB_SCHEMA] Creating aff_referrals table...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS aff_referrals (
                 id SERIAL PRIMARY KEY,
@@ -41,6 +46,7 @@ def init_all_schemas():
         """)
         
         # Global referrer mapping (ONE referrer per user across ALL bots, first-touch wins)
+        logger.debug("[DB_SCHEMA] Creating aff_user_referrers table...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS aff_user_referrers (
                 user_id BIGINT PRIMARY KEY,
@@ -51,6 +57,7 @@ def init_all_schemas():
         """)
 
         # Conversions table (no FK to aff_referrals: referrer_id is a Telegram user id, not aff_referrals.id)
+        logger.debug("[DB_SCHEMA] Creating aff_conversions table...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS aff_conversions (
                 id SERIAL PRIMARY KEY,
@@ -83,6 +90,7 @@ def init_all_schemas():
         """)
         
         # Commissions table
+        logger.debug("[DB_SCHEMA] Creating aff_commissions table...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS aff_commissions (
                 id SERIAL PRIMARY KEY,
@@ -98,6 +106,7 @@ def init_all_schemas():
         """)
         
         # Payouts table
+        logger.debug("[DB_SCHEMA] Creating aff_payouts table...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS aff_payouts (
                 id SERIAL PRIMARY KEY,
@@ -113,6 +122,7 @@ def init_all_schemas():
         """)
         
         # Helpful indexes
+        logger.debug("[DB_SCHEMA] Creating indexes...")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_referrals_referrer ON aff_referrals(referrer_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_conversions_referrer ON aff_conversions(referrer_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_aff_payouts_referrer ON aff_payouts(referrer_id)")
@@ -120,10 +130,10 @@ def init_all_schemas():
 
 
         conn.commit()
-        logger.info("Affiliate schemas initialized")
+        logger.info("✅ [DB_SCHEMA] Affiliate schemas initialized successfully")
         return True
     except Exception as e:
-        logger.error(f"Schema init error: {e}")
+        logger.error(f"❌ [DB_SCHEMA] Schema initialization error: {e}", exc_info=True)
         conn.rollback()
         return False
     finally:
@@ -136,6 +146,7 @@ def init_all_schemas():
 
 def ensure_commission_row(referrer_id: int) -> bool:
     """Ensure a commissions row exists for a referrer (idempotent)."""
+    logger.debug(f"[DB_COMMISSION] Ensuring commission row for user {referrer_id}...")
     conn = get_connection()
     if not conn:
         return False
@@ -150,9 +161,10 @@ def ensure_commission_row(referrer_id: int) -> bool:
             (referrer_id,),
         )
         conn.commit()
+        logger.debug(f"[DB_COMMISSION] Commission row ensured for {referrer_id}")
         return True
     except Exception as e:
-        logger.error(f"Ensure commission row error: {e}")
+        logger.error(f"[DB_COMMISSION] Error ensuring commission row: {e}", exc_info=True)
         conn.rollback()
         return False
     finally:
@@ -166,6 +178,7 @@ def ensure_commission_row(referrer_id: int) -> bool:
 
 def create_referral(referrer_id, referral_id, referral_link: str | None = None):
     """Create referral"""
+    logger.info(f"[DB_CREATE_REFERRAL] Creating referral: referrer={referrer_id} referral={referral_id}")
     conn = get_connection()
     if not conn:
         return False
@@ -190,9 +203,10 @@ def create_referral(referrer_id, referral_id, referral_link: str | None = None):
         """, (referral_id, referrer_id, os.getenv("BOT_USERNAME")))
         
         conn.commit()
+        logger.debug(f"[DB_CREATE_REFERRAL] Referral created successfully")
         return True
     except Exception as e:
-        logger.error(f"Create referral error: {e}")
+        logger.error(f"[DB_CREATE_REFERRAL] Error creating referral: {e}", exc_info=True)
         conn.rollback()
         return False
     finally:
@@ -277,6 +291,7 @@ def record_conversion(referrer_id, referral_id, conversion_type, value):
 
 def get_referral_stats(referrer_id):
     """Get referrer stats"""
+    logger.debug(f"[DB_GET_STATS] Retrieving stats for referrer {referrer_id}")
     conn = get_connection()
     if not conn:
         return {}
@@ -306,7 +321,7 @@ def get_referral_stats(referrer_id):
         
         comm_row = cur.fetchone()
         
-        return {
+        stats = {
             'total_referrals': row[0] if row else 0,
             'active_referrals': row[1] if row else 0,
             'total_commissions': float(row[2]) if row else 0,
@@ -314,8 +329,10 @@ def get_referral_stats(referrer_id):
             'pending': float(comm_row[1]) if comm_row else 0,
             'tier': comm_row[2] if comm_row else 'bronze'
         }
+        logger.debug(f"[DB_GET_STATS] Stats retrieved: {stats}")
+        return stats
     except Exception as e:
-        logger.error(f"Get stats error: {e}")
+        logger.error(f"[DB_GET_STATS] Error retrieving stats: {e}", exc_info=True)
         return {}
     finally:
         if cur:
@@ -329,6 +346,7 @@ def request_payout(referrer_id, amount, wallet_address: str | None = None):
 
     Requires a verified TON wallet address (stored via TON Connect).
     """
+    logger.info(f"[DB_REQUEST_PAYOUT] Payout request: referrer={referrer_id} amount={amount}")
     conn = get_connection()
     if not conn:
         return False
@@ -350,11 +368,13 @@ def request_payout(referrer_id, amount, wallet_address: str | None = None):
 
         row = cur.fetchone()
         if not row:
+            logger.warning(f"[DB_REQUEST_PAYOUT] User {referrer_id} not found")
             return False
 
         pending, verified, stored_wallet = row
 
         if pending is None or float(pending) < float(amount):
+            logger.warning(f"[DB_REQUEST_PAYOUT] Insufficient balance for {referrer_id}: pending={pending} requested={amount}")
             return False
 
         # If caller provided a wallet, store/verify it
@@ -371,7 +391,7 @@ def request_payout(referrer_id, amount, wallet_address: str | None = None):
             )
 
         if not verified or not stored_wallet:
-            logger.warning(f"Payout requested without verified wallet: referrer_id={referrer_id}")
+            logger.warning(f"[DB_REQUEST_PAYOUT] Wallet not verified for {referrer_id}")
             return False
 
         # Create payout request
@@ -394,9 +414,10 @@ def request_payout(referrer_id, amount, wallet_address: str | None = None):
         )
 
         conn.commit()
+        logger.info(f"✅ [DB_REQUEST_PAYOUT] Payout request created successfully")
         return True
     except Exception as e:
-        logger.error(f"Request payout error: {e}")
+        logger.error(f"❌ [DB_REQUEST_PAYOUT] Error: {e}", exc_info=True)
         conn.rollback()
         return False
     finally:
@@ -408,6 +429,7 @@ def request_payout(referrer_id, amount, wallet_address: str | None = None):
 
 def get_pending_payouts(referrer_id):
     """Get pending payouts"""
+    logger.debug(f"[DB_GET_PAYOUTS] Retrieving pending payouts for {referrer_id}")
     conn = get_connection()
     if not conn:
         return []
@@ -423,7 +445,7 @@ def get_pending_payouts(referrer_id):
         """, (referrer_id,))
         
         rows = cur.fetchall()
-        return [
+        payouts = [
             {
                 'id': row[0],
                 'amount': float(row[1]),
@@ -432,8 +454,10 @@ def get_pending_payouts(referrer_id):
             }
             for row in rows
         ]
+        logger.debug(f"[DB_GET_PAYOUTS] Found {len(payouts)} pending payouts")
+        return payouts
     except Exception as e:
-        logger.error(f"Get payouts error: {e}")
+        logger.error(f"[DB_GET_PAYOUTS] Error: {e}", exc_info=True)
         return []
     finally:
         if cur:
@@ -444,6 +468,7 @@ def get_pending_payouts(referrer_id):
 
 def verify_ton_wallet(referrer_id, wallet_address):
     """Verify TON wallet"""
+    logger.info(f"[DB_TON_VERIFY] Verifying wallet for {referrer_id}")
     conn = get_connection()
     if not conn:
         return False
@@ -461,9 +486,10 @@ def verify_ton_wallet(referrer_id, wallet_address):
         """, (referrer_id, wallet_address))
         
         conn.commit()
+        logger.debug(f"[DB_TON_VERIFY] Wallet verified successfully")
         return True
     except Exception as e:
-        logger.error(f"Verify wallet error: {e}")
+        logger.error(f"[DB_TON_VERIFY] Error: {e}", exc_info=True)
         conn.rollback()
         return False
     finally:
@@ -475,6 +501,7 @@ def verify_ton_wallet(referrer_id, wallet_address):
 
 def get_tier_info(referrer_id):
     """Get tier information"""
+    logger.debug(f"[DB_GET_TIER] Retrieving tier info for {referrer_id}")
     conn = get_connection()
     if not conn:
         return None
@@ -509,15 +536,18 @@ def get_tier_info(referrer_id):
         
         row = cur.fetchone()
         if row:
-            return {
+            tier_info = {
                 'total_earned': float(row[0]),
                 'tier': row[1],
                 'tier_emoji': row[2],
                 'commission_rate': float(row[3])
             }
+            logger.debug(f"[DB_GET_TIER] Tier info: {tier_info['tier']} {tier_info['tier_emoji']}")
+            return tier_info
+        logger.debug(f"[DB_GET_TIER] No tier info found for {referrer_id}")
         return None
     except Exception as e:
-        logger.error(f"Get tier error: {e}")
+        logger.error(f"[DB_GET_TIER] Error: {e}", exc_info=True)
         return None
     finally:
         if cur:
@@ -528,6 +558,7 @@ def get_tier_info(referrer_id):
 
 def complete_payout(payout_id, tx_hash):
     """Complete payout with transaction hash"""
+    logger.info(f"[DB_COMPLETE_PAYOUT] Completing payout {payout_id} with tx={tx_hash[:16]}...")
     conn = get_connection()
     if not conn:
         return False
@@ -551,6 +582,7 @@ def complete_payout(payout_id, tx_hash):
         row = cur.fetchone()
         if row:
             referrer_id, amount = row
+            logger.debug(f"[DB_COMPLETE_PAYOUT] Updating withdrawn amount for {referrer_id}")
             # Update total_withdrawn
             cur.execute("""
                 UPDATE aff_commissions SET
@@ -559,9 +591,10 @@ def complete_payout(payout_id, tx_hash):
             """, (amount, referrer_id))
         
         conn.commit()
+        logger.info(f"✅ [DB_COMPLETE_PAYOUT] Payout completed successfully")
         return True
     except Exception as e:
-        logger.error(f"Complete payout error: {e}")
+        logger.error(f"❌ [DB_COMPLETE_PAYOUT] Error: {e}", exc_info=True)
         conn.rollback()
         return False
     finally:

@@ -8,7 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import CommandHandler, Application
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.learning.miniapp")
 
 MINIAPP_URL = os.getenv(
     "MINIAPP_URL",
@@ -44,15 +44,20 @@ async def cmd_open_learning(update, context):
 
 def register_miniapp(app: Application):
     """Register miniapp commands"""
-    app.add_handler(CommandHandler("learning", cmd_open_learning))
-    app.add_handler(CommandHandler("academy", cmd_open_learning))
-    logger.info("Miniapp commands registered")
+    logger.info("[MINIAPP] Registering miniapp commands...")
+    try:
+        app.add_handler(CommandHandler("learning", cmd_open_learning))
+        app.add_handler(CommandHandler("academy", cmd_open_learning))
+        logger.info("✅ [MINIAPP] Miniapp commands registered")
+    except Exception as e:
+        logger.error(f"❌ [MINIAPP] Failed to register commands: {e}", exc_info=True)
 
 
 # ===== API ROUTES =====
 
 async def register_miniapp_routes(webapp: web.Application, app: Application):
     """Register HTTP routes for mini-app"""
+    logger.info("[API_INIT] Registering learning API routes...")
     
     # ===== COURSES =====
     @webapp.post("/api/learning/courses")
@@ -62,8 +67,10 @@ async def register_miniapp_routes(webapp: web.Application, app: Application):
             data = await request.json()
             user_id = data.get("user_id")
             level = data.get("level")
+            logger.debug(f"[API_COURSES] Request: user_id={user_id} level={level}")
             
             if not database:
+                logger.error("[API_COURSES] Database unavailable")
                 return web.json_response({"error": "Database unavailable"}, status=500)
             
             if user_id:
@@ -71,12 +78,13 @@ async def register_miniapp_routes(webapp: web.Application, app: Application):
             else:
                 courses = database.get_all_courses(level)
             
+            logger.debug(f"[API_COURSES] Returned {len(courses or [])} courses")
             return web.json_response({
                 "status": "ok",
                 "data": [dict(c) for c in (courses or [])]
             })
         except Exception as e:
-            logger.error(f"Courses API error: {e}")
+            logger.error(f"[API_COURSES] Error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
     
     

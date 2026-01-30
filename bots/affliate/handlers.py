@@ -5,13 +5,13 @@ from multiprocessing import context
 import os
 from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, Application
 from .database import (
     create_referral, get_referral_stats, get_tier_info, 
     verify_ton_wallet, request_payout, get_pending_payouts, ensure_commission_row
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.affiliate.handlers")
 
 try:
     from shared.emrd_rewards_integration import award_points
@@ -48,23 +48,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiliate Bot - Referral Program"""
     user = update.effective_user
     chat = update.effective_chat
-    logger.info(f"/start from user={user.id} chat_type={chat.type} args={context.args}")
+    logger.info(f"[CMD_START] user={user.id} chat_type={chat.type} args={context.args}")
 
     # Ensure the starter has a commission row (so stats/link always work)
-    ensure_commission_row(user.id)
+    try:
+        ensure_commission_row(user.id)
+        logger.debug(f"[CMD_START] Commission row ensured for user {user.id}")
+    except Exception as e:
+        logger.error(f"[CMD_START] Error ensuring commission row: {e}", exc_info=True)
 
     # Check for referral parameter
     if context.args and context.args[0].startswith("aff_"):
         try:
             referrer_id = int(context.args[0].replace("aff_", ""))
-        except Exception:
+            logger.debug(f"[CMD_START] Parsed referrer_id from args: {referrer_id}")
+        except Exception as e:
+            logger.warning(f"[CMD_START] Failed to parse referrer_id: {e}")
             referrer_id = None
 
         if referrer_id and referrer_id != user.id:
-            ensure_commission_row(referrer_id)
-            # store the referrer's link for traceability (optional, but useful)
-            create_referral(referrer_id, user.id, referral_link=build_referral_link(referrer_id))
-            logger.info(f"New referral: {user.id} referred by {referrer_id}")
+            try:
+                ensure_commission_row(referrer_id)
+                # store the referrer's link for traceability (optional, but useful)
+                create_referral(referrer_id, user.id, referral_link=build_referral_link(referrer_id))
+                logger.info(f"✅ [CMD_START] New referral: user={user.id} referrer={referrer_id}")
+            except Exception as e:
+                logger.error(f"❌ [CMD_START] Failed to create referral: {e}", exc_info=True)
 
     if chat.type == "private":
         welcome_text = (
@@ -114,8 +123,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_my_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get affiliate link"""
     user = update.effective_user
+    logger.info(f"[CMD_MY_LINK] user={user.id}")
     
-    link = build_referral_link(user.id)
+    try:
+        link = build_referral_link(user.id)
+        logger.debug(f"[CMD_MY_LINK] Generated link for user {user.id}")
+    except Exception as e:
+        logger.error(f"[CMD_MY_LINK] Error building link: {e}", exc_info=True)
+        await update.message.reply_text("❌ Fehler beim Generieren des Links")
+        return
     
     link_text = (
         f"🔗 **Dein Affiliate Link**\n\n"
@@ -134,9 +150,16 @@ async def cmd_my_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get referral stats"""
     user = update.effective_user
+    logger.info(f"[CMD_STATS] user={user.id}")
     
-    stats = get_referral_stats(user.id)
-    tier_info = get_tier_info(user.id)
+    try:
+        stats = get_referral_stats(user.id)
+        tier_info = get_tier_info(user.id)
+        logger.debug(f"[CMD_STATS] Retrieved stats for user {user.id}: {stats}")
+    except Exception as e:
+        logger.error(f"[CMD_STATS] Error retrieving stats: {e}", exc_info=True)
+        await update.message.reply_text("❌ Fehler beim Abrufen der Statistiken")
+        return
     
     stats_text = (
         f"📊 **Deine Affiliate Stats**\n\n"
@@ -159,6 +182,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help"""
+    logger.info(f"[CMD_HELP] user={update.effective_user.id}")
     help_text = """
 💚 **Affiliate Bot - Hilfe**
 
@@ -194,36 +218,49 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user = update.effective_user
+    logger.info(f"[BUTTON_CALLBACK] user={user.id} data={query.data}")
     
-    if query.data == "aff_help":
-        await cmd_help(update, context)
-    elif query.data == "aff_stats":
-        await cmd_stats(update, context)
-    elif query.data == "aff_link":
-        await cmd_my_link(update, context)
-    elif query.data == "aff_wallet":
-        wallet_text = (
-            "🪙 **TON Connect Wallet**\n\n"
-            "Öffne das Dashboard um dein TON Wallet zu verbinden.\n\n"
-            "✅ Wallet Connected\n"
-            "✅ EMRD Claiming enabled\n"
-            "✅ Instant Payout aktiv"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "💰 Dashboard",
-                web_app=WebAppInfo(url=build_miniapp_url())
-            )],
-        ])
-        await query.edit_message_text(wallet_text, parse_mode="Markdown", reply_markup=keyboard)
+    try:
+        if query.data == "aff_help":
+            await cmd_help(update, context)
+        elif query.data == "aff_stats":
+            await cmd_stats(update, context)
+        elif query.data == "aff_link":
+            await cmd_my_link(update, context)
+        elif query.data == "aff_wallet":
+            logger.debug(f"[BUTTON_CALLBACK] Showing wallet info for user {user.id}")
+            wallet_text = (
+                "🪙 **TON Connect Wallet**\n\n"
+                "Öffne das Dashboard um dein TON Wallet zu verbinden.\n\n"
+                "✅ Wallet Connected\n"
+                "✅ EMRD Claiming enabled\n"
+                "✅ Instant Payout aktiv"
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "💰 Dashboard",
+                    web_app=WebAppInfo(url=build_miniapp_url())
+                )],
+            ])
+            await query.edit_message_text(wallet_text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            logger.warning(f"[BUTTON_CALLBACK] Unknown callback data: {query.data}")
+    except Exception as e:
+        logger.error(f"[BUTTON_CALLBACK] Error handling callback: {e}", exc_info=True)
 
 
-def register_handlers(app):
+def register_handlers(app: Application):
     """Register handlers"""
-    app.add_handler(CommandHandler("start", cmd_start), group=0)
-    app.add_handler(CommandHandler("affiliate", cmd_start), group=0)
-    app.add_handler(CommandHandler("link", cmd_my_link), group=0)
-    app.add_handler(CommandHandler("stats", cmd_stats), group=0)
-    app.add_handler(CommandHandler("help", cmd_help), group=0)
-    
-    app.add_handler(CallbackQueryHandler(button_callback), group=1)
+    logger.info("[REGISTER] Registering affiliate handlers...")
+    try:
+        app.add_handler(CommandHandler("start", cmd_start), group=0)
+        app.add_handler(CommandHandler("affiliate", cmd_start), group=0)
+        app.add_handler(CommandHandler("link", cmd_my_link), group=0)
+        app.add_handler(CommandHandler("stats", cmd_stats), group=0)
+        app.add_handler(CommandHandler("help", cmd_help), group=0)
+        logger.debug("[REGISTER] Command handlers registered")
+        
+        app.add_handler(CallbackQueryHandler(button_callback), group=1)
+        logger.info("✅ [REGISTER] All affiliate handlers registered successfully")
+    except Exception as e:
+        logger.error(f"❌ [REGISTER] Failed to register handlers: {e}", exc_info=True)

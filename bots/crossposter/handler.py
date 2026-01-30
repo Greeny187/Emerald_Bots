@@ -52,7 +52,7 @@ async def discord_post(webhook_url: str, content: str, username: str = None, ava
             r.raise_for_status()
             logger.info(f"Discord post erfolgreich: {webhook_url[:50]}...")
     except httpx.HTTPError as e:
-        logger.error(f"Discord post fehlgeschlagen: {e}")
+        logger.exception(f"Discord post fehlgeschlagen: {e}")
         raise
 
 async def _get_x_access_token(tenant_id: int):
@@ -76,17 +76,17 @@ async def _get_x_access_token(tenant_id: int):
                         logger.warning(f"Invalid X token format for tenant {tenant_id}")
     except Exception as e:
         logger.warning(f"Error fetching X token from database: {e}")
-    
+
     # Fallback to environment variable
     token = os.environ.get("X_ACCESS_TOKEN")
     if not token:
         logger.error("X_ACCESS_TOKEN environment variable not set")
         raise ValueError("X_ACCESS_TOKEN not configured")
-    
+
     if len(token) < 10:
         logger.error("X_ACCESS_TOKEN format invalid")
         raise ValueError("X_ACCESS_TOKEN format invalid")
-    
+
     logger.debug("Using environment X token")
     return token
 
@@ -109,7 +109,10 @@ async def _get_media_file(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Main message routing handler."""
     chat_id = update.effective_chat.id
-    
+    msg_id = getattr(update.effective_message, "message_id", None)
+    has_media = bool(update.effective_message.photo or update.effective_message.document or update.effective_message.video)
+    logger.debug(f"Incoming message chat_id={chat_id} msg_id={msg_id} has_media={has_media}")
+
     # Get database pool with error handling
     try:
         pool = await asyncio.wait_for(get_pool(), timeout=5)
@@ -119,10 +122,10 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except asyncio.TimeoutError:
         logger.error("Database timeout getting pool")
         return
-    except Exception as e:
-        logger.error(f"Failed to get database pool: {e}")
+    except Exception:
+        logger.exception("Failed to get database pool")
         return
-    
+
     # Fetch active routes for this chat
     try:
         routes = await asyncio.wait_for(
@@ -135,16 +138,21 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except asyncio.TimeoutError:
         logger.error(f"Timeout fetching routes for chat {chat_id}")
         return
-    except Exception as e:
-        logger.error(f"Error fetching routes for chat {chat_id}: {e}")
+    except Exception:
+        logger.exception(f"Error fetching routes for chat {chat_id}")
         return
-    
+
     if not routes:
+        logger.debug(f"Keine aktiven Routen für chat_id={chat_id}")
         return
 
     dedup_hash = await _hash_message(update)
     text = update.effective_message.text or update.effective_message.caption or ""
-    
+
+    logger.info(
+        f"Crosspost check: chat_id={chat_id} msg_id={msg_id} routes={len(routes)} dedup={dedup_hash[:10]}..."
+    )
+
     # Optional: get media
     media_bytes = None
     if context.bot and (update.effective_message.photo or update.effective_message.document):
@@ -153,21 +161,26 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Process each route
     for r in routes:
         try:
+            logger.debug(
+                f"Route {r['id']} tenant={r['tenant_id']} destinations={len(r['destinations'] or [])}"
+            )
             # Apply filters
             wl = set(r["filters"].get("hashtags_whitelist", []))
             bl = set(r["filters"].get("hashtags_blacklist", []))
             tags = {t for t in text.split() if t.startswith('#')}
-            
+
             # Check whitelist
             if wl and not (tags & set(f"#{t}" for t in wl)):
-                await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id, 
+                await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                               {"type": "filter"}, "skipped", "Whitelist nicht getroffen", dedup_hash)
+                logger.debug(f"Route {r['id']} skipped (whitelist) tags={list(tags)[:10]}")
                 continue
-            
+
             # Check blacklist
             if bl and (tags & set(f"#{t}" for t in bl)):
                 await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                               {"type": "filter"}, "skipped", "Blacklist getroffen", dedup_hash)
+                logger.debug(f"Route {r['id']} skipped (blacklist) tags={list(tags)[:10]}")
                 continue
 
             final_text = await _apply_transform(text, r["transform"])
@@ -175,6 +188,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Send to each destination
             for dest in r["destinations"]:
                 try:
+                    logger.debug(f"Route {r['id']} -> dest={dest.get('type')} payload_keys={list(dest.keys())}")
                     if dest.get("type") == "telegram" and dest.get("chat_id"):
                         try:
                             if update.effective_message.photo or update.effective_message.document:
@@ -188,10 +202,10 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 await context.bot.send_message(dest["chat_id"], final_text or text)
                             await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                                           dest, "sent", None, dedup_hash)
-                            logger.info(f"Telegram crosspost erfolgreich: {dest['chat_id']}")
+                            logger.info(f"Telegram crosspost erfolgreich: dest_chat_id={dest['chat_id']}")
                         except Exception as te:
                             raise Exception(f"Telegram error: {str(te)}")
-                    
+
                     elif dest.get("type") == "x":
                         try:
                             token = await _get_x_access_token(r["tenant_id"])
@@ -201,10 +215,10 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 await x_post_text(token, final_text or text)
                             await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                                           dest, "sent", None, dedup_hash)
-                            logger.info(f"X post erfolgreich")
+                            logger.info("X post erfolgreich")
                         except Exception as xe:
                             raise Exception(f"X error: {str(xe)}")
-                    
+
                     elif dest.get("type") in ("discord", "discord_webhook"):
                         try:
                             url = dest.get("webhook_url")
@@ -213,17 +227,16 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await discord_post(url, final_text or text, dest.get("username"), dest.get("avatar_url"))
                             await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                                           dest, "sent", None, dedup_hash)
-                            logger.info(f"Discord post erfolgreich")
+                            logger.info("Discord post erfolgreich")
                         except Exception as de:
                             raise Exception(f"Discord error: {str(de)}")
-                
+
                 except Exception as dest_error:
-                    logger.error(f"Destination error: {dest_error}")
+                    logger.exception(f"Destination error: {dest_error}")
                     await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                                   dest, "error", str(dest_error), dedup_hash)
-        
+
         except Exception as route_error:
-            logger.error(f"Route processing error for route {r['id']}: {route_error}")
+            logger.exception(f"Route processing error for route {r['id']}: {route_error}")
             await log_event(r["tenant_id"], r["id"], chat_id, update.effective_message.message_id,
                           {"type": "route"}, "error", str(route_error), dedup_hash)
-

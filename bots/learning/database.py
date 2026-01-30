@@ -8,20 +8,22 @@ from typing import Optional, List, Dict
 import json
 from datetime import datetime, timedelta
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.learning.database")
 
 def get_db_connection():
     try:
         return psycopg2.connect(os.getenv("DATABASE_URL"))
     except Exception as e:
-        logger.error(f"DB error: {e}")
+        logger.error(f"[DB_CONNECT] Database connection error: {e}", exc_info=True)
         return None
 
 
 def init_all_schemas():
     """Initialize Learning database schemas"""
+    logger.info("[DB_SCHEMA] Initializing learning database schemas...")
     conn = get_db_connection()
     if not conn:
+        logger.error("[DB_SCHEMA] Failed to get database connection")
         return
     
     try:
@@ -169,9 +171,9 @@ def init_all_schemas():
         """)
         
         conn.commit()
-        logger.info("Learning schemas initialized")
+        logger.info("✅ [DB_SCHEMA] Learning schemas initialized successfully")
     except Exception as e:
-        logger.error(f"Schema error: {e}")
+        logger.error(f"❌ [DB_SCHEMA] Schema initialization error: {e}", exc_info=True)
         conn.rollback()
     finally:
         if cur:
@@ -184,6 +186,7 @@ def init_all_schemas():
 
 def get_all_courses(level: Optional[str] = None) -> List[Dict]:
     """Get all available courses, optionally filtered by level"""
+    logger.debug(f"[DB_GET_COURSES] Fetching courses: level={level}")
     conn = get_db_connection()
     if not conn:
         return []
@@ -198,9 +201,11 @@ def get_all_courses(level: Optional[str] = None) -> List[Dict]:
             """, (level,))
         else:
             cur.execute("SELECT * FROM learning_courses ORDER BY id")
-        return cur.fetchall() or []
+        courses = cur.fetchall() or []
+        logger.debug(f"[DB_GET_COURSES] Returned {len(courses)} courses")
+        return courses
     except Exception as e:
-        logger.error(f"Error fetching courses: {e}")
+        logger.error(f"[DB_GET_COURSES] Error: {e}", exc_info=True)
         return []
     finally:
         if cur:
@@ -290,6 +295,7 @@ def get_user_courses(user_id: int) -> List[Dict]:
 
 def get_course_stats(user_id: int) -> Dict:
     """Get user's learning statistics"""
+    logger.debug(f"[DB_GET_STATS] Retrieving stats for user {user_id}")
     conn = get_db_connection()
     if not conn:
         return {}
@@ -323,15 +329,17 @@ def get_course_stats(user_id: int) -> Dict:
         """, (user_id,))
         streak_data = cur.fetchone() or {'current_streak': 0, 'longest_streak': 0}
         
-        return {
+        stats = {
             'total_courses': total_courses,
             'completed_courses': completed_courses,
             'emrd_earned': emrd_earned,
             'current_streak': streak_data['current_streak'],
             'longest_streak': streak_data['longest_streak']
         }
+        logger.debug(f"[DB_GET_STATS] Stats retrieved: {stats}")
+        return stats
     except Exception as e:
-        logger.error(f"Error fetching stats: {e}")
+        logger.error(f"[DB_GET_STATS] Error: {e}", exc_info=True)
         return {}
     finally:
         if cur:
