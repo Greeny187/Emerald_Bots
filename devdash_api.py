@@ -656,15 +656,19 @@ async def system_health(request: web.Request):
             health["services"]["database"] = "operational"
             
             # Get detailed stats
-            stats = await fetchrow("""
-                select 
-                    (select count(*) from dashboard_users) as users_total,
-                    (select count(*) from dashboard_bots where is_active=true) as bots_active,
-                    (select count(*) from dashboard_bots) as bots_total,
-                    (select count(*) from adv_campaigns where enabled=true) as ads_active,
-                    (select count(*) from adv_campaigns) as ads_total,
-                    (select count(*) from dashboard_token_events) as token_events
-            """)
+            try:
+                stats = await fetchrow("""
+                    select 
+                        (select count(*) from dashboard_users) as users_total,
+                        (select count(*) from dashboard_bots where is_active=true) as bots_active,
+                        (select count(*) from dashboard_bots) as bots_total,
+                        (select count(*) from adv_campaigns where enabled=true) as ads_active,
+                        (select count(*) from adv_campaigns) as ads_total,
+                        (select count(*) from dashboard_token_events) as token_events
+                """)
+            except Exception as e:
+                log.warning(f"Could not fetch stats: {e}")
+                stats = None
             
             if stats:
                 health["database"]["users_total"] = stats.get('users_total', 0)
@@ -984,7 +988,7 @@ async def overview(request: web.Request):
             return 0
 
     users_total = await _to_thread(lambda: cnt("select count(1) as c from dashboard_users"))
-    ads_active = await _to_thread(lambda: cnt("select count(1) as c from dashboard_ads where is_active=true"))
+    ads_active = await _to_thread(lambda: cnt("select count(1) as c from adv_campaigns where enabled=true"))
     bots_active = await _to_thread(lambda: cnt("select count(1) as c from dashboard_bots where is_active=true"))
     return _json({"users_total": users_total, "ads_active": ads_active, "bots_active": bots_active}, request)
 
@@ -1345,46 +1349,45 @@ async def user_update_tier(request: web.Request):
 async def ad_performance_report(request):
     """Generiere detaillierten Ad-Performance Report"""
     await _auth_user(request)
-    ad_id = request.query.get("ad_id")
+    campaign_id = request.query.get("campaign_id")
     days = int(request.query.get("days", "30"))
     
     sql = """
         SELECT 
-            ad_id,
+            campaign_id,
             event_type,
             COUNT(*) as count,
-            COUNT(DISTINCT telegram_id) as unique_users,
-            COUNT(DISTINCT bot_username) as bot_count
-        FROM dashboard_ad_events
+            COUNT(DISTINCT user_id) as unique_users
+        FROM adv_campaigns_events
         WHERE created_at > now() - interval '%s days'
     """
     params = (days,)
     
-    if ad_id:
-        sql += " AND ad_id = %s"
-        params = params + (ad_id,)
+    if campaign_id:
+        sql += " AND campaign_id = %s"
+        params = params + (campaign_id,)
     
-    sql += " GROUP BY ad_id, event_type ORDER BY ad_id"
+    sql += " GROUP BY campaign_id, event_type ORDER BY campaign_id"
     
     rows = await fetch(sql, params)
     
     # Calculate CTR (Click-Through Rate)
     data = {}
     for row in rows:
-        aid = row['ad_id']
-        if aid not in data:
-            data[aid] = {'impressions': 0, 'clicks': 0}
+        cid = row['campaign_id']
+        if cid not in data:
+            data[cid] = {'impressions': 0, 'clicks': 0}
         
         if row['event_type'] == 'impression':
-            data[aid]['impressions'] = row['count']
+            data[cid]['impressions'] = row['count']
         elif row['event_type'] == 'click':
-            data[aid]['clicks'] = row['count']
+            data[cid]['clicks'] = row['count']
     
     # Add CTR
-    for aid in data:
-        impressions = data[aid]['impressions']
-        clicks = data[aid]['clicks']
-        data[aid]['ctr'] = (clicks / impressions * 100) if impressions > 0 else 0
+    for cid in data:
+        impressions = data[cid]['impressions']
+        clicks = data[cid]['clicks']
+        data[cid]['ctr'] = (clicks / impressions * 100) if impressions > 0 else 0
     
     return _json({"report": data}, request)
 
@@ -1395,30 +1398,29 @@ async def ad_roi_analysis(request):
     
     sql = """
         SELECT 
-            da.id,
-            da.name,
-            da.placement,
-            da.bot_slug,
-            COUNT(CASE WHEN dae.event_type = 'impression' THEN 1 END) as impressions,
-            COUNT(CASE WHEN dae.event_type = 'click' THEN 1 END) as clicks,
-            COUNT(CASE WHEN dae.event_type = 'view' THEN 1 END) as views,
-            COUNT(DISTINCT dae.telegram_id) as unique_users,
-            da.created_at,
-            da.updated_at
-        FROM dashboard_ads da
-        LEFT JOIN dashboard_ad_events dae ON da.id = dae.ad_id
-        WHERE da.created_at > now() - interval '90 days'
-        GROUP BY da.id, da.name, da.placement, da.bot_slug, da.created_at, da.updated_at
-        ORDER BY clicks DESC
+            id,
+            title,
+            link_url,
+            weight,
+            enabled,
+            created_at,
+            start_ts,
+            end_ts,
+            (SELECT COUNT(*) FROM adv_campaigns_events WHERE campaign_id=adv_campaigns.id AND event_type='impression') as impressions,
+            (SELECT COUNT(*) FROM adv_campaigns_events WHERE campaign_id=adv_campaigns.id AND event_type='click') as clicks,
+            (SELECT COUNT(DISTINCT user_id) FROM adv_campaigns_events WHERE campaign_id=adv_campaigns.id) as unique_users
+        FROM adv_campaigns
+        WHERE created_at > now() - interval '90 days'
+        ORDER BY created_at DESC
     """
     
     rows = await fetch(sql)
     
     return _json({
         "campaigns": rows,
-        "total_impressions": sum(r['impressions'] or 0 for r in rows),
-        "total_clicks": sum(r['clicks'] or 0 for r in rows),
-        "avg_ctr": sum((r['clicks'] or 0) / (r['impressions'] or 1) * 100 for r in rows) / len(rows) if rows else 0
+        "total_impressions": sum(r.get('impressions') or 0 for r in rows),
+        "total_clicks": sum(r.get('clicks') or 0 for r in rows),
+        "avg_ctr": sum((r.get('clicks') or 0) / (r.get('impressions') or 1) * 100 for r in rows) / len(rows) if rows else 0
     }, request)
 
 
@@ -1687,16 +1689,17 @@ async def export_ads_report(request):
     
     sql = """
         select 
-            da.name,
-            da.placement,
-            da.bot_slug,
-            count(case when dae.event_type = 'impression' then 1 end) as impressions,
-            count(case when dae.event_type = 'click' then 1 end) as clicks,
-            count(distinct dae.telegram_id) as unique_users
-        from dashboard_ads da
-        left join dashboard_ad_events dae on da.id = dae.ad_id
-        group by da.name, da.placement, da.bot_slug
-        order by clicks desc
+            id,
+            title,
+            media_url,
+            link_url,
+            enabled,
+            weight,
+            created_at,
+            start_ts,
+            end_ts
+        from adv_campaigns
+        order by created_at desc
     """
     
     rows = await fetch(sql)
@@ -2121,7 +2124,7 @@ async def monitoring_data(request: web.Request):
             select 
                 (select count(*) from dashboard_users) as users_count,
                 (select count(*) from dashboard_bots where is_active=true) as active_bots,
-                (select count(*) from dashboard_ads where is_active=true) as active_ads,
+                (select count(*) from adv_campaigns where enabled=true) as active_ads,
                 (select count(*) from dashboard_token_events) as token_events_count
         """)
         
@@ -2129,7 +2132,7 @@ async def monitoring_data(request: web.Request):
         activity = await fetchrow("""
             select 
                 (select count(*) from dashboard_users where updated_at > now() - interval '24 hours') as users_24h,
-                (select count(*) from dashboard_ads where created_at > now() - interval '24 hours') as ads_24h
+                (select count(*) from adv_campaigns where created_at > now() - interval '24 hours') as ads_24h
         """)
         
         monitoring = {
@@ -3161,7 +3164,7 @@ async def dao_bot_stats(request: web.Request):
                 id,
                 title,
                 status,
-                (SELECT COUNT(*) FROM dao_votes WHERE proposal_id=CAST(dao_proposals.id AS integer)) as vote_count
+                (SELECT COUNT(*) FROM dao_votes WHERE proposal_id=CAST(dao_proposals.id AS text)) as vote_count
             FROM dao_proposals
             ORDER BY vote_count DESC
             LIMIT 5

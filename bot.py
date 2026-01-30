@@ -270,10 +270,7 @@ async def main():
         webhook_url = f"{APP_BASE_URL}/webhook/{cfg['route_key']}"
         await app.bot.set_webhook(
             url=webhook_url,
-            allowed_updates=[
-                "message","edited_message","channel_post","edited_channel_post",
-                "chat_member","my_chat_member"
-            ]
+            allowed_updates=Update.ALL_TYPES
         )
         APPLICATIONS[cfg["route_key"]] = app
         ROUTEKEY_TO_NAME[cfg["route_key"]] = cfg["name"]
