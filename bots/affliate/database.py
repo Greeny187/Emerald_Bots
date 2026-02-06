@@ -301,18 +301,16 @@ def get_referral_stats(referrer_id):
         
         ensure_commission_row(referrer_id)
 
+        # Count referrals and get commissions
         cur.execute("""
             SELECT
                 COUNT(DISTINCT r.referral_id) AS total_referrals,
-                COUNT(*) FILTER (WHERE r.status = 'active') AS active_referrals,
-                COALESCE(SUM(c.commission), 0) AS total_commissions
+                COUNT(*) FILTER (WHERE r.status = 'active') AS active_referrals
             FROM aff_referrals r
-            LEFT JOIN aff_conversions c
-                ON c.referrer_id = r.referrer_id AND c.referral_id = r.referral_id
             WHERE r.referrer_id = %s
         """, (referrer_id,))
         
-        row = cur.fetchone()
+        ref_row = cur.fetchone()
         
         cur.execute("""
             SELECT total_earned, pending, tier
@@ -322,11 +320,10 @@ def get_referral_stats(referrer_id):
         comm_row = cur.fetchone()
         
         stats = {
-            'total_referrals': row[0] if row else 0,
-            'active_referrals': row[1] if row else 0,
-            'total_commissions': float(row[2]) if row else 0,
-            'total_earned': float(comm_row[0]) if comm_row else 0,
-            'pending': float(comm_row[1]) if comm_row else 0,
+            'total_referrals': ref_row[0] if ref_row else 0,
+            'active_referrals': ref_row[1] if ref_row else 0,
+            'total_earned': float(comm_row[0]) if comm_row and comm_row[0] else 0,
+            'pending': float(comm_row[1]) if comm_row and comm_row[1] else 0,
             'tier': comm_row[2] if comm_row else 'bronze'
         }
         logger.debug(f"[DB_GET_STATS] Stats retrieved: {stats}")

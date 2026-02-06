@@ -2,12 +2,13 @@
 
 import logging
 import os
-import json
 from aiohttp import web
 from .database import (
     get_referral_stats, request_payout, get_pending_payouts,
-    create_referral, get_tier_info, verify_ton_wallet, complete_payout
+    get_tier_info, verify_ton_wallet, complete_payout,
+    ensure_commission_row
 )
+import psycopg2
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ async def register_miniapp(webapp):
     try:
         webapp.router.add_get("/api/affiliate/stats", get_stats)
         webapp.router.add_post("/api/affiliate/stats", get_stats)
+        webapp.router.add_post("/api/affiliate/referrals", get_referral_list)
         webapp.router.add_post("/api/affiliate/payout", request_payout_route)
         webapp.router.add_post("/api/affiliate/pending", get_pending)
         webapp.router.add_post("/api/affiliate/ton-verify", verify_wallet)
@@ -87,6 +89,7 @@ async def get_stats(request):
             )
         
         referrer_id = int(referrer_id)
+        ensure_commission_row(referrer_id)
         stats = get_referral_stats(referrer_id)
         tier_info = get_tier_info(referrer_id)
         logger.debug(f"[API_STATS] Retrieved stats: {stats}")
@@ -145,6 +148,59 @@ async def request_payout_route(request):
         })
     except Exception as e:
         logger.error(f"[PAYOUT_REQUEST] Error: {e}", exc_info=True)
+        return web.json_response(
+            {'success': False, 'error': str(e)},
+            status=400
+        )
+
+
+async def get_referral_list(request):
+    """POST /api/affiliate/referrals - Get referrals list"""
+    try:
+        data = await request.json()
+        referrer_id = int(data.get('referrer_id'))
+        logger.debug(f"[API_REFERRALS] Request for referrer_id={referrer_id}")
+        
+        if not referrer_id:
+            return web.json_response(
+                {'success': False, 'error': 'Referrer ID erforderlich'},
+                status=400
+            )
+        
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        if not conn:
+            return web.json_response(
+                {'success': False, 'error': 'Datenbankverbindung fehlgeschlagen'},
+                status=500
+            )
+        
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT r.id, r.referral_id, r.status, r.created_at
+            FROM aff_referrals r
+            WHERE r.referrer_id = %s
+            ORDER BY r.created_at DESC
+            LIMIT 50
+        """, (referrer_id,))
+        
+        rows = cur.fetchall()
+        referrals = [
+            {
+                'id': row[0],
+                'referral_id': row[1],
+                'status': row[2],
+                'created_at': row[3].isoformat() if row[3] else None
+            }
+            for row in rows
+        ]
+        cur.close()
+        conn.close()
+        
+        logger.debug(f"[API_REFERRALS] Found {len(referrals)} referrals")
+        return web.json_response({'success': True, 'referrals': referrals})
+    except Exception as e:
+        logger.error(f"[API_REFERRALS] Error: {e}", exc_info=True)
         return web.json_response(
             {'success': False, 'error': str(e)},
             status=400
@@ -287,12 +343,21 @@ async def complete_payout_route(request):
 
 async def get_tonconnect_manifest(request):
     """GET /tonconnect-manifest.json - Serve TonConnect manifest"""
-    manifest = {
-        "url": PUBLIC_BASE_URL,
-        "name": "Emerald Affiliate",
-        "iconUrl": f"{PUBLIC_BASE_URL}/assets/logo.png"
-    }
-    return web.json_response(manifest)
+    try:
+        base_url = PUBLIC_BASE_URL or request.url.scheme + "://" + request.url.host
+        manifest = {
+            "url": base_url,
+            "name": "Emerald Affiliate",
+            "iconUrl": f"{base_url}/assets/logo.png"
+        }
+        logger.debug(f"[TONCONNECT_MANIFEST] Serving manifest with url={base_url}")
+        return web.json_response(manifest)
+    except Exception as e:
+        logger.error(f"[TONCONNECT_MANIFEST] Error: {e}", exc_info=True)
+        return web.json_response(
+            {"url": "https://localhost", "name": "Emerald Affiliate",
+             "iconUrl": "https://localhost/assets/logo.png"}
+        )
 
 
 async def get_affiliate_app(request):
