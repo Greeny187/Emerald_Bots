@@ -42,7 +42,8 @@ except Exception:
     _register_dao_miniapp = None
 try:
     from bots.affliate.miniapp import register_miniapp as _register_affiliate_miniapp
-except Exception:
+except Exception as e:
+    logging.error(f"❌ Failed to import affiliate miniapp: {e}", exc_info=True)
     _register_affiliate_miniapp = None
 
 
@@ -315,9 +316,11 @@ async def main():
             logging.warning("DAO miniapp registration failed: %s", e)
     if _register_affiliate_miniapp and "affliate" in APPLICATIONS:
         try:
+            logging.info("[MINIAPP] Initializing affiliate miniapp routes...")
             await _register_affiliate_miniapp(webapp)
+            logging.info("✅ [MINIAPP] Affiliate miniapp routes registered successfully")
         except Exception as e:
-            logging.warning("Affiliate miniapp registration failed: %s", e)
+            logging.error(f"❌ [MINIAPP] Affiliate miniapp registration failed: {e}", exc_info=True)
     
     logging.info("DevDash mounting on: %r", type(webapp))
     

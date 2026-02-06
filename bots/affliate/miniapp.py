@@ -39,9 +39,17 @@ async def register_miniapp(webapp):
     logger.info("[MINIAPP_INIT] Starting affiliate miniapp registration...")
     
     # ensure CORS is enabled for MiniApp calls from GitHub Pages / Telegram WebView
-    if cors_middleware not in getattr(webapp, "middlewares", []):
+    # Check if any CORS middleware already exists
+    has_cors = any(
+        'cors_middleware' in str(m) or 'Access-Control' in str(m)
+        for m in getattr(webapp, "middlewares", [])
+    )
+    
+    if not has_cors:
         logger.debug("[MINIAPP_INIT] Adding CORS middleware")
-        webapp.middlewares.append(cors_middleware)
+        webapp.middlewares.insert(0, cors_middleware)  # Add at front
+    else:
+        logger.debug("[MINIAPP_INIT] CORS middleware already present")
 
     logger.debug("[MINIAPP_INIT] Registering API routes...")
     try:

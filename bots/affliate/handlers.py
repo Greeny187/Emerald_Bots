@@ -21,7 +21,15 @@ except ImportError:
 
 # Configuration
 AFFILIATE_BOT_USERNAME = os.getenv("AFFILIATE_BOT_USERNAME", os.getenv("BOT_USERNAME", "emerald_affiliate_bot")).lstrip("@")
-AFFILIATE_API_BASE_URL = os.getenv("AFFILIATE_API_BASE_URL", "").rstrip("/")
+
+# CRITICAL: Use APP_BASE_URL as fallback if AFFILIATE_API_BASE_URL not set
+# This ensures the ?api= parameter is added to the dashboard URL
+AFFILIATE_API_BASE_URL = (
+    os.getenv("AFFILIATE_API_BASE_URL") or 
+    os.getenv("APP_BASE_URL") or 
+    ""
+).rstrip("/")
+
 AFFILIATE_MINIAPP_URL = os.getenv(
     "AFFILIATE_MINIAPP_URL",
     "https://greeny187.github.io/EmeraldContentBots/miniapp/appaffiliate.html"
