@@ -4,14 +4,14 @@ from telethon.sessions import StringSession
 # Beachte: SESSION optional für Import, Raise erfolgt in start_telethon()
 
 # Telegram-API-Zugangsdaten aus den Umgebungsvariablen
-API_ID   = int(os.getenv("TG_API_ID"))
+_api_id  = os.getenv("TG_API_ID")
+API_ID   = int(_api_id) if _api_id else None
 API_HASH = os.getenv("TG_API_HASH")
 # Eine StringSession für einen Benutzeraccount ist notwendig, da Bots keine GetHistoryRequests erlauben
 SESSION  = os.getenv("TELETHON_SESSION")  # StringSession für Benutzer-Login
 
 # Client-Instanz erzeugen (StringSession speichert Login-Daten)
 telethon_client = TelegramClient(StringSession(SESSION) if SESSION else StringSession(), API_ID, API_HASH)
-("TELETHON_SESSION")
 
 if not all([API_ID, API_HASH, SESSION]):
     print(f"API_ID: {API_ID}, API_HASH: {'gesetzt' if API_HASH else 'fehlt'}, SESSION: {'gesetzt' if SESSION else 'fehlt'}")
@@ -22,10 +22,6 @@ async def start_telethon():
     if not SESSION:
         print(f"API_ID: {API_ID}, API_HASH: {'gesetzt' if API_HASH else 'fehlt'}, SESSION: {'gesetzt' if SESSION else 'fehlt'}")
         raise RuntimeError("Die Umgebungsvariable TELETHON_SESSION ist nicht gesetzt. Bitte SESSION erzeugen und in Heroku Config hinzufügen!")
-    await telethon_client.connect()
-    if not await telethon_client.is_user_authorized():
-        raise RuntimeError("Telethon-Client ist nicht autorisiert! Bitte valide TELETHON_SESSION setzen.")()
-    """Stellt eine Verbindung mit dem Telegram-API-Server her und überprüft die Autorisierung."""
     await telethon_client.connect()
     if not await telethon_client.is_user_authorized():
         raise RuntimeError("Telethon-Client ist nicht autorisiert! Bitte SESSION prüfen.")

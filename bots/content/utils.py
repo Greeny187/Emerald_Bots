@@ -182,6 +182,39 @@ def is_deleted_account(member) -> bool:
     if not any([user.first_name, user.last_name, user.username]):
         return True
     return False
+async def _get_telethon_client():
+    """
+    Lazy import, damit utils.py nicht beim Import schon crasht, falls Telethon-Env fehlt.
+    Gibt (telethon_client, start_telethon) oder (None, None) zurück.
+    """
+    try:
+        from shared.telethon_client import telethon_client, start_telethon
+        return telethon_client, start_telethon
+    except Exception as e:
+        logger.warning(f"[clean_delete] Telethon nicht verfügbar: {type(e).__name__}: {e}")
+        return None, None
+
+async def _iter_deleted_participants_via_telethon(chat_id: int, *, limit: int | None = None):
+    """
+    Iteriert *nur* gelöschte Accounts aus dem Chat via MTProto (Telethon).
+    Kein Import in DB nötig.
+    """
+    telethon_client, start_telethon = await _get_telethon_client()
+    if not telethon_client or not start_telethon:
+        return
+
+    if not telethon_client.is_connected():
+        await start_telethon()
+
+    entity = await telethon_client.get_entity(chat_id)
+    seen = 0
+    async for user in telethon_client.iter_participants(entity):
+        # Telethon: gelöschte Accounts haben i.d.R. user.deleted == True
+        if getattr(user, "deleted", False):
+            yield user
+        seen += 1
+        if limit and seen >= limit:
+            break
 
 async def _get_member(bot: ExtBot, chat_id: int, user_id: int) -> ChatMember | None:
     try:
@@ -196,7 +229,9 @@ async def _get_member(bot: ExtBot, chat_id: int, user_id: int) -> ChatMember | N
 
 async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
                                          dry_run: bool = False,
-                                         demote_admins: bool = False) -> int:
+                                         demote_admins: bool = False,
+                                         source: str = "auto",
+                                         telethon_limit: int | None = None) -> int:
     """
     Entfernt geloeschte Accounts per ban+unban.
     - Entfernt DB-Eintrag NUR, wenn Kick erfolgreich war ODER der User nicht (mehr) im Chat ist.
@@ -208,34 +243,47 @@ async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
     # Permission check at start
     try:
         bot_member = await bot.get_chat_member(chat_id, bot.id)
-        logger.debug(f"[clean_delete] Bot permissions: can_restrict={bot_member.can_restrict_members}, can_promote={bot_member.can_promote_members}")
-        
-        if not bot_member.can_restrict_members or not bot_member.can_promote_members:
-            logger.warning(f"[clean_delete] ABORT in {chat_id}: insufficient permissions "
-                         f"(can_restrict={bot_member.can_restrict_members}, can_promote={bot_member.can_promote_members})")
+        can_restrict = bool(getattr(bot_member, "can_restrict_members", False))
+        can_promote  = bool(getattr(bot_member, "can_promote_members", False))
+        logger.debug(f"[clean_delete] Bot permissions: can_restrict={can_restrict}, can_promote={can_promote}")
+
+        if not can_restrict:
+            logger.warning(f"[clean_delete] ABORT in {chat_id}: missing can_restrict_members")
             return 0
+
+        # can_promote wird nur gebraucht, wenn wir deleted Admins demoten sollen
+        if demote_admins and not can_promote:
+            logger.warning(f"[clean_delete] demote_admins=True, aber Bot hat kein can_promote_members -> demote deaktiviert")
+            demote_admins = False
     except Exception as e:
         logger.error(f"[clean_delete] ABORT in {chat_id}: failed to get permissions: {type(e).__name__}: {e}")
         return 0
     
-    user_ids = [uid for uid in list_members(chat_id) if uid and uid > 0]
-    logger.info(f"[clean_delete] Scanning {len(user_ids)} members in {chat_id} for deleted accounts...")
     removed = 0
 
-    for uid in user_ids:
-        member = await _get_member(bot, chat_id, uid)
-        if member is None:
-            # Nicht (mehr) im Chat -> soft-delete in DB markieren (Audit-Trail)
-            logger.debug(f"[clean_delete] User {uid} not in chat anymore, marking as deleted...")
-            try: 
-                mark_member_deleted(chat_id, uid)
-                logger.debug(f"[clean_delete] Marked {uid} as deleted (soft-delete)")
-            except Exception as e: 
-                logger.debug(f"[clean_delete] Failed to mark {uid} as deleted: {e}")
-            continue
+    # Quelle wählen:
+    # - "telethon": vollständiger Scan ohne DB-Import
+    # - "db": scannt nur DB-known members (schnell, aber unvollständig wenn nicht importiert)
+    # - "auto": bevorzugt Telethon, wenn verfügbar (damit dein Problem direkt gelöst ist)
+    src = (source or "auto").lower().strip()
+    
+    if src in ("auto", "telethon", "mtproto"):
+        # Versuche Telethon-Scan (vollständig)
+        any_telethon = False
+        logger.info(f"[clean_delete] Using Telethon scan for chat {chat_id} (limit={telethon_limit})")
+        async for tl_user in _iter_deleted_participants_via_telethon(chat_id, limit=telethon_limit):
+            any_telethon = True
+            uid = int(getattr(tl_user, "id"))
 
-        # Gelöschten Status erkennen
-        looks_del = is_deleted_account(member)
+            # Für Status/Admin-Check nutzen wir Bot API nur für Treffer (sparsam)
+            member = await _get_member(bot, chat_id, uid)
+            if member is None:
+                try:
+                    mark_member_deleted(chat_id, uid)
+                except Exception:
+                    pass
+
+            looks_del = True  # Telethon liefert schon "deleted"
 
         # Admin/Owner-Handhabung
         if member.status in ("administrator", "creator"):
@@ -243,7 +291,6 @@ async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
                 # Creator (Owner) nie anfassen; Admins nur wenn demote_admins=True
                 if looks_del:
                     logger.debug(f"[clean_delete] User {uid} is deleted {member.status} but demote_admins={demote_admins}, skipping")
-                continue
             # Demote versuchen (alle Rechte false)
             logger.info(f"[clean_delete] Demoting deleted {member.status} {uid}...")
             try:
@@ -258,17 +305,14 @@ async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
                 member = await _get_member(bot, chat_id, uid)
                 logger.info(f"[clean_delete] Successfully demoted {uid}")
             except Exception as e:
-                logger.warning(f"[clean_delete] Demote failed for {uid}: {type(e).__name__}: {e}")
-                continue  # ohne Demote kein Kick mÃ¶glich
-
+                logger.warning(f"[clean_delete] Demote failed for {uid}: {type(e).__name__}: {e}") 
+                
         if not looks_del:
             logger.debug(f"[clean_delete] User {uid} does not look deleted, skipping")
-            continue
 
         if dry_run:
             logger.info(f"[clean_delete] DRY_RUN: Would remove deleted account {uid}")
             removed += 1
-            continue
 
         kicked = False
         logger.info(f"[clean_delete] Banning deleted account {uid}...")
@@ -297,7 +341,71 @@ async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
         except Exception as e:
             logger.debug(f"[clean_delete] Failed to mark {uid} as deleted: {e}")
 
-    logger.info(f"[clean_delete] Cleanup complete for {chat_id}: removed {removed} deleted accounts (dry_run={dry_run})")
+        if any_telethon:
+            logger.info(f"[clean_delete] Cleanup complete for {chat_id} via Telethon: removed {removed} deleted accounts (dry_run={dry_run})")
+            return removed
+
+        # Falls Telethon nicht verfügbar oder liefert nichts -> optional DB-Fallback
+        if src in ("telethon", "mtproto"):
+            logger.warning(f"[clean_delete] Telethon scan not available/empty for {chat_id}, no DB fallback (source={src})")
+            return removed
+
+    # DB-Fallback (schnell, aber nur bekannte Member)
+    user_ids = [uid for uid in list_members(chat_id) if uid and uid > 0]
+    logger.info(f"[clean_delete] Using DB member list: scanning {len(user_ids)} members in {chat_id} for deleted accounts...")
+    for uid in user_ids:
+        member = await _get_member(bot, chat_id, uid)
+        if member is None:
+            try:
+                mark_member_deleted(chat_id, uid)
+            except Exception:
+                pass
+            continue
+
+        looks_del = is_deleted_account(member)
+
+        if member.status in ("administrator", "creator"):
+            if not looks_del or not demote_admins or member.status == "creator":
+                continue
+            try:
+                await bot.promote_chat_member(
+                    chat_id, uid,
+                    can_manage_chat=False, can_post_messages=False, can_edit_messages=False,
+                    can_delete_messages=False, can_manage_video_chats=False, can_invite_users=False,
+                    can_restrict_members=False, can_pin_messages=False, can_promote_members=False,
+                    is_anonymous=False
+                )
+                member = await _get_member(bot, chat_id, uid)
+            except Exception:
+                continue
+
+        if not looks_del:
+            continue
+
+        if dry_run:
+            removed += 1
+            continue
+
+        kicked = False
+        try:
+            await bot.ban_chat_member(chat_id, uid)
+            try:
+                await bot.unban_chat_member(chat_id, uid, only_if_banned=True)
+            except BadRequest:
+                pass
+            kicked = True
+            removed += 1
+        except (Forbidden, BadRequest):
+            pass
+
+        try:
+            member_after = await _get_member(bot, chat_id, uid)
+            if kicked or member_after is None or getattr(member_after, "status", "") in ("left", "kicked"):
+                mark_member_deleted(chat_id, uid)
+        except Exception:
+            pass
+
+    logger.info(f"[clean_delete] Cleanup complete for {chat_id}: removed {removed} deleted accounts (dry_run={dry_run}, source={src})")
     return removed
 
 async def cleanup_removed_chats(context) -> None:

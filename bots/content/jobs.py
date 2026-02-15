@@ -203,7 +203,16 @@ async def purge_members_job(context: ContextTypes.DEFAULT_TYPE):
 async def job_cleanup_deleted(context):
     chat_id = context.job.chat_id
     s = get_clean_deleted_settings(chat_id) or {}
-    count = await clean_delete_accounts_for_chat(chat_id, context.bot)
+    # Jobdata kann Demote/Quelle enthalten, sonst Settings/Default
+    demote = False
+    source = None
+    try:
+        demote = bool(getattr(context.job.data, "demote", False))
+        source = getattr(context.job.data, "source", None)
+    except Exception:
+        pass
+    source = source or s.get("source") or "auto"  # "auto" bevorzugt Telethon
+    count = await clean_delete_accounts_for_chat(chat_id, context.bot, demote_admins=demote, source=source)
     # Nur wenn Notify aktiv:
     if s.get("notify"):
         try:
