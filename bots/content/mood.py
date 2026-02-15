@@ -126,9 +126,10 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     message_id = query.message.message_id  # <- Korrekte message_id verwenden
     
-    data = query.data  # z.B. mood_like
+    data = query.data # z.B. mood_like
     mood = data.split("_", 1)[1] if "_" in data else "like"
-    
+    logger.info(f"[mood] callback chat={chat.id} mid={message_id} user={user.id} data={data!r}")
+
     try:
         # Korrekte Parameter-Reihenfolge: chat_id, message_id, user_id, mood
         await _call_db(save_mood, chat.id, message_id, user.id, mood)

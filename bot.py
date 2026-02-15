@@ -130,8 +130,8 @@ async def build_application(bot_cfg: Dict, is_primary: bool) -> Application:
     token = bot_cfg["token"]
 
     persistence = PicklePersistence(filepath=f"state_{route_key}.pickle")
-    app_builder = (Application.builder().token(token).arbitrary_callback_data(True).persistence(persistence))
-    
+    app_builder = (Application.builder().token(token).persistence(persistence))
+        
     # Optional: HTTPX-Request aus shared.network (empfohlen)
     if name == "content" and os.getenv("SKIP_CUSTOM_REQUEST", "0") != "1":
         try:
