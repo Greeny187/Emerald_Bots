@@ -179,7 +179,19 @@ async def webhook_handler(request: web.Request):
         return web.Response(status=404, text="Unknown bot route key.")
     try:
         data = await request.json()
-        logging.info("Update %s keys=%s", route_key, list(data.keys()))
+        keys = list(data.keys())
+        utype = "unknown"
+        if "callback_query" in data: utype = "callback_query"
+        elif "message" in data: utype = "message"
+        elif "edited_message" in data: utype = "edited_message"
+        elif "chat_member" in data: utype = "chat_member"
+        logging.info("[IN] %s type=%s keys=%s", route_key, utype, keys)
+        if "callback_query" in data:
+            cq = data.get("callback_query") or {}
+            logging.info("[IN] %s callback data=%r from=%s",
+                         route_key,
+                         cq.get("data"),
+                         (cq.get("from") or {}).get("id"))
     except Exception:
         return web.Response(status=400, text="Invalid JSON")
 
