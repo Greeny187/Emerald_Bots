@@ -47,6 +47,43 @@ def _extract_domains_from_text(text: str) -> list[str]:
     
     return sorted(list(domains))
 
+def _extract_domains_from_message(msg) -> list[str]:
+    """
+    Extrahiert Domains aus Text/Captions und aus URL-Entities (inkl. versteckter Links).
+    """
+    if not msg:
+        return []
+
+    domains = set()
+    text = msg.text or ""
+    caption = msg.caption or ""
+
+    domains.update(_extract_domains_from_text(text))
+    if caption:
+        domains.update(_extract_domains_from_text(caption))
+
+    for ent in (msg.entities or []):
+        try:
+            if getattr(ent, "type", "") == "text_link" and getattr(ent, "url", None):
+                domains.update(_extract_domains_from_text(ent.url))
+            elif getattr(ent, "type", "") == "url" and text:
+                part = text[ent.offset: ent.offset + ent.length]
+                domains.update(_extract_domains_from_text(part))
+        except Exception:
+            pass
+
+    for ent in (msg.caption_entities or []):
+        try:
+            if getattr(ent, "type", "") == "text_link" and getattr(ent, "url", None):
+                domains.update(_extract_domains_from_text(ent.url))
+            elif getattr(ent, "type", "") == "url" and caption:
+                part = caption[ent.offset: ent.offset + ent.length]
+                domains.update(_extract_domains_from_text(part))
+        except Exception:
+            pass
+
+    return sorted(domains)
+
 def heuristic_link_risk(domains: list[str]) -> float:
     """
     Berechnet Risiko-Score (0.0-1.0) für eine Liste von Domains.

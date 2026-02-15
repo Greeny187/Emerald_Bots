@@ -21,7 +21,7 @@ async def list_chats():
             print(f" • {title:30} | ID: {entity.id:>15} | Username: {username}")
     await client.disconnect()
 
-async def import_members(group_identifier: str):
+async def import_members(group_identifier: str, *, verbose: bool = True) -> int:
     from telethon.sessions import StringSession
     client = TelegramClient(StringSession(os.getenv("SESSION_STRING")),
     api_id, api_hash)
@@ -52,15 +52,19 @@ async def import_members(group_identifier: str):
         # Normale Gruppen/Chats haben ihre ID direkt
         chat_id_db = entity.id
 
-    print(f"\nImportiere Mitglieder von: {entity.title or entity.username} (DB chat_id={chat_id_db})\n")
+    if verbose:
+        print(f"\nImportiere Mitglieder von: {entity.title or entity.username} (DB chat_id={chat_id_db})\n")
     count = 0
     async for user in client.iter_participants(entity):
         add_member(chat_id_db, user.id)
-        print(f"✅ {user.id:<10} {user.username or '-':<20} wurde gespeichert (chat_id={chat_id_db}).")
+        if verbose:
+            print(f"âœ… {user.id:<10} {user.username or '-':<20} wurde gespeichert (chat_id={chat_id_db}).")
         count += 1
 
-    print(f"\nFertig! Insgesamt {count} Mitglieder gespeichert.")
+    if verbose:
+        print(f"\nFertig! Insgesamt {count} Mitglieder gespeichert.")
     await client.disconnect()
+    return count
 
 async def main():
     parser = argparse.ArgumentParser(description="Importiere Telegram-Mitglieder und speichere sie in der vorhandenen Datenbank")

@@ -447,6 +447,25 @@ def init_db(cur):
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS mood_meter (
+            chat_id BIGINT,
+            message_id BIGINT,
+            user_id BIGINT,
+            mood TEXT NOT NULL,
+            PRIMARY KEY (chat_id, message_id, user_id)
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mood_topics (
+            chat_id BIGINT PRIMARY KEY,
+            topic_id BIGINT
+        );
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS welcome (
             chat_id BIGINT PRIMARY KEY,
             photo_id TEXT,
@@ -3428,13 +3447,16 @@ def list_members(cur, chat_id: int) -> list[int]:
     Wird für Clean-Delete verwendet um gelöschte Accounts zu finden.
     """
     cur.execute("""
+        SELECT DISTINCT user_id FROM members
+        WHERE chat_id = %s AND is_deleted = FALSE
+        UNION
         SELECT DISTINCT user_id FROM message_logs
         WHERE chat_id = %s
         UNION
         SELECT DISTINCT user_id FROM member_events
         WHERE group_id = %s
         ORDER BY user_id
-    """, (chat_id, chat_id))
+    """, (chat_id, chat_id, chat_id))
     return [row[0] for row in cur.fetchall()]
 
 @_with_cursor

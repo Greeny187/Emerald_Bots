@@ -1,4 +1,5 @@
 ﻿import os
+import asyncio
 import datetime
 import re
 import logging
@@ -34,7 +35,8 @@ from .database import (register_group, get_registered_groups, get_rules, set_wel
     )
 from zoneinfo import ZoneInfo
 from .patchnotes import __version__, PATCH_NOTES
-from .utils import (clean_delete_accounts_for_chat, _apply_hard_permissions, _extract_domains_from_text, heuristic_link_risk)
+from .utils import (clean_delete_accounts_for_chat, _apply_hard_permissions, _extract_domains_from_text,
+                    _extract_domains_from_message, heuristic_link_risk)
 from .statistic import log_spam_event, log_night_event
 from shared.translator import translate_hybrid
 
@@ -299,7 +301,7 @@ async def spam_enforcer(update, context):
         return
 
     # Domains zuverlässig extrahieren (richtige Utils-Funktion!)
-    domains_in_msg = _extract_domains_from_text(text)
+    domains_in_msg = _extract_domains_from_message(msg)
     violation = False
     reason = None
     if domains_in_msg:
@@ -1527,6 +1529,71 @@ async def sync_admins_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Fehler bei Sync Admins fÃ¼r {chat_id}: {e}")
     await update.message.reply_text(f"âœ… {total} Admin-EintrÃ¤ge in der DB angelegt.")
 
+async def sync_members_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in ("group", "supergroup"):
+        return await msg.reply_text("Nur in Gruppen verfÃ¼gbar.")
+
+    # Admin-Check
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        admin_ids = {a.user.id for a in admins}
+        if user.id not in admin_ids:
+            return await msg.reply_text("Nur Admins dÃ¼rfen das ausfÃ¼hren.")
+    except Exception:
+        return await msg.reply_text("Adminrechte konnten nicht geprÃ¼ft werden.")
+
+    # Einfacher Lock pro Chat
+    if context.chat_data.get("sync_members_running"):
+        return await msg.reply_text("Sync lÃ¤uft bereits. Bitte warten.")
+    context.chat_data["sync_members_running"] = True
+
+    args = {a.lower() for a in (context.args or [])}
+    force_admins_only = ("--admins-only" in args) or ("admins" in args)
+    force_telethon = ("--telethon" in args) or ("telethon" in args)
+
+    has_session = bool(os.getenv("SESSION_STRING"))
+    use_telethon = (has_session and not force_admins_only) or (force_telethon and has_session)
+
+    if force_telethon and not has_session:
+        context.chat_data.pop("sync_members_running", None)
+        return await msg.reply_text("SESSION_STRING fehlt â€“ Telethon-Sync nicht mÃ¶glich.")
+
+    async def _sync_admins_only():
+        total = 0
+        try:
+            admins = await context.bot.get_chat_administrators(chat.id)
+            for adm in admins:
+                add_member(chat.id, adm.user.id)
+                total += 1
+            await context.bot.send_message(chat.id, f"âœ… Admin-Sync fertig: {total} Admins gespeichert.")
+        finally:
+            context.chat_data.pop("sync_members_running", None)
+
+    async def _sync_via_telethon():
+        try:
+            from .import_members import import_members
+            cid = str(chat.id)
+            if cid.startswith("-100"):
+                cid = cid[4:]
+            await context.bot.send_message(chat.id, "â³ Telethon-Sync gestartet â€“ das kann etwas dauern...")
+            count = await import_members(cid, verbose=False)
+            await context.bot.send_message(chat.id, f"âœ… Telethon-Sync fertig: {count} Mitglieder gespeichert.")
+        except Exception as e:
+            await context.bot.send_message(chat.id, f"âš ï¸ Telethon-Sync fehlgeschlagen: {type(e).__name__}: {e}")
+        finally:
+            context.chat_data.pop("sync_members_running", None)
+
+    if use_telethon:
+        asyncio.create_task(_sync_via_telethon())
+        return
+
+    # Fallback: Admins-only
+    asyncio.create_task(_sync_admins_only())
+    return
+
 # Callback-Handler fÃ¼r Button-Captcha
 async def button_captcha_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1628,6 +1695,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("spamlevel", spamlevel_command), group=-3)
     app.add_handler(CommandHandler("topiclimit", topiclimit_command), group=-3)
     app.add_handler(CommandHandler("sync_admins_all", sync_admins_all, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("syncmembers", sync_members_command, filters=filters.ChatType.GROUPS), group=-3)
     app.add_handler(CommandHandler("faq", faq_command), group=-3)
     app.add_handler(CommandHandler("myquota", myquota_command), group=-3)
     app.add_handler(CommandHandler("mystrikes", mystrikes_command), group=-3)
