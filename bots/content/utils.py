@@ -223,7 +223,7 @@ async def _get_member(bot: ExtBot, chat_id: int, user_id: int) -> ChatMember | N
         await asyncio.sleep(getattr(e, "retry_after", 1))
         return await bot.get_chat_member(chat_id, user_id)
     except BadRequest as e:
-        # z. B. "Chat member not found" â†’ nicht (mehr) Mitglied
+        # z. B. "Chat member not found" → nicht (mehr) Mitglied
         logger.debug(f"get_chat_member({chat_id},{user_id}) -> {e}")
         return None
 
@@ -332,7 +332,7 @@ async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
         except BadRequest as e:
             logger.warning(f"[clean_delete] Bad request removing {uid}: {e}")
 
-        # DB nur dann mit soft-delete markieren, wenn wirklich drauÃŸen
+        # DB nur dann mit soft-delete markieren, wenn wirklich draußen
         try:
             member_after = await _get_member(bot, chat_id, uid)
             if kicked or member_after is None or getattr(member_after, "status", "") in ("left", "kicked"):

@@ -1,7 +1,7 @@
 ﻿import os, json, logging
 from typing import Optional, Dict, Any
 
-# Nur leichte DB-Helpers importieren (keine zirkulÃ¤ren AbhÃ¤ngigkeiten mit utils)
+# Nur leichte DB-Helpers importieren (keine zirkulären Abhängigkeiten mit utils)
 from .database import is_pro_chat, get_ai_settings, effective_ai_mod_policy  # vorhandene DB-Funktionen
 
 log = logging.getLogger(__name__)
@@ -39,9 +39,9 @@ def can_use_aimod(chat_id: int, topic_id: Optional[int]) -> bool:
 
 async def ai_summarize(text: str, lang: str = "de") -> Optional[str]:
     """
-    Sehr knapper TL;DR (1â€“2 SÃ¤tze) in 'lang'.
+    Sehr knapper TL;DR (1–2 Sätze) in 'lang'.
     KEIN Pro-Check hier: Der erfolgt an der Call-Site (z. B. FAQ-Fallback),
-    damit alte Aufrufe abwÃ¤rtskompatibel bleiben.
+    damit alte Aufrufe abwärtskompatibel bleiben.
     """
     if not ai_available() or not text:
         return None
@@ -49,7 +49,7 @@ async def ai_summarize(text: str, lang: str = "de") -> Optional[str]:
         client = _client()
         prompt = (
             f"Fasse die folgende News extrem knapp auf {lang} zusammen "
-            f"(max. 2 SÃ¤tze, keine Floskeln):\n\n{text}"
+            f"(max. 2 Sätze, keine Floskeln):\n\n{text}"
         )
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -70,7 +70,7 @@ async def ai_summarize(text: str, lang: str = "de") -> Optional[str]:
 async def ai_moderate_image(image_url: str) -> Optional[Dict[str, float]]:
     """
     Scores 0..1: nudity, sexual_minors, violence, weapons, gore.
-    KEIN Pro-Check hier â€“ Gate an der Call-Site (ai_moderation_enforcer).
+    KEIN Pro-Check hier – Gate an der Call-Site (ai_moderation_enforcer).
     """
     if not ai_available() or not image_url:
         return None
@@ -83,7 +83,7 @@ async def ai_moderate_image(image_url: str) -> Optional[Dict[str, float]]:
             temperature=0,
             max_tokens=120,
             messages=[
-                {"role": "system", "content": "Du antwortest ausschlieÃŸlich mit JSON."},
+                {"role": "system", "content": "Du antwortest ausschließlich mit JSON."},
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": image_url}}
@@ -103,8 +103,8 @@ async def ai_moderate_image(image_url: str) -> Optional[Dict[str, float]]:
 
 async def ai_moderate_text(text: str, model: str = "omni-moderation-latest") -> Optional[Dict[str, Any]]:
     """
-    RÃ¼ckgabe: {'categories': {'toxicity':score,...}, 'flagged': bool}
-    KEIN Pro-Check hier â€“ Gate an der Call-Site (ai_moderation_enforcer).
+    Rückgabe: {'categories': {'toxicity':score,...}, 'flagged': bool}
+    KEIN Pro-Check hier – Gate an der Call-Site (ai_moderation_enforcer).
     """
     if not ai_available() or not text:
         return None
@@ -115,7 +115,7 @@ async def ai_moderate_text(text: str, model: str = "omni-moderation-latest") -> 
             out = res.results[0]
             cats = getattr(out, "category_scores", {}) or {}
             scores = {
-                # robuste Zuordnung â€“ identisch zu vorher
+                # robuste Zuordnung – identisch zu vorher
                 "toxicity":   float(cats.get("harassment/threats", 0.0) or cats.get("harassment", 0.0)),
                 "hate":       float(cats.get("hate", 0.0) or cats.get("hate/threatening", 0.0)),
                 "sexual":     float(cats.get("sexual/minors", 0.0) or cats.get("sexual", 0.0)),
@@ -127,9 +127,9 @@ async def ai_moderate_text(text: str, model: str = "omni-moderation-latest") -> 
         except Exception:
             # Fallback: Klassifikation via Chat-Modell (JSON-only)
             prompt = (
-                "Klassifiziere den folgenden Text. Gib JSON zurÃ¼ck mit keys: "
+                "Klassifiziere den folgenden Text. Gib JSON zurück mit keys: "
                 "toxicity,hate,sexual,harassment,selfharm,violence (Werte 0..1). "
-                "Nur das JSON, keine ErklÃ¤rungen.\n\n" + text[:6000]
+                "Nur das JSON, keine Erklärungen.\n\n" + text[:6000]
             )
             res = client.chat.completions.create(
                 model="gpt-4o-mini",

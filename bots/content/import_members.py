@@ -58,7 +58,7 @@ async def import_members(group_identifier: str, *, verbose: bool = True) -> int:
     async for user in client.iter_participants(entity):
         add_member(chat_id_db, user.id)
         if verbose:
-            print(f"âœ… {user.id:<10} {user.username or '-':<20} wurde gespeichert (chat_id={chat_id_db}).")
+            print(f"✅ {user.id:<10} {user.username or '-':<20} wurde gespeichert (chat_id={chat_id_db}).")
         count += 1
 
     if verbose:

@@ -138,7 +138,7 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         original_text = query.message.text
         txt = f"{original_text}\n\n👍 {counts.get('like',0)} | 👎 {counts.get('dislike',0)} | 🤔 {counts.get('think',0)}"
         
-        # Message mit neuen ZÃ¤hlungen editieren
+        # Message mit neuen Zählungen editieren
         await query.edit_message_text(
             text=txt,
             reply_markup=query.message.reply_markup
