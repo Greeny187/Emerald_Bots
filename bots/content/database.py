@@ -1505,6 +1505,34 @@ def add_member(cur, chat_id: int, user_id: int):
         (chat_id, user_id)
     )
     logger.info(f"✅ add_member: user {user_id} zu chat {chat_id} hinzugefügt")
+    
+@_with_cursor
+def add_members_bulk(cur, chat_id: int, user_ids: list[int], log: bool = True) -> int:
+    """Fügt viele Member-IDs in einem Rutsch hinzu (ON CONFLICT DO NOTHING).
+
+    - Importiert NUR IDs (kein User-Profil, keine Namen).
+    - Für große Gruppen deutlich schneller/leiser als add_member() pro User.
+    - Rückgabe = Anzahl der IDs, die wir versucht haben einzufügen (Duplikate werden DB-seitig ignoriert).
+    """
+    if not user_ids:
+        return 0
+
+    # unique + sanitize
+    try:
+        ids = sorted({int(u) for u in user_ids if u})
+    except Exception:
+        ids = [int(u) for u in user_ids if u]
+
+    if not ids:
+        return 0
+
+    cur.executemany(
+        "INSERT INTO members (chat_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING;",
+        [(chat_id, uid) for uid in ids]
+    )
+    if log:
+        logger.info(f"✅ add_members_bulk: chat {chat_id} imported {len(ids)} IDs (Duplikate werden ignoriert)")
+    return len(ids)
 
 @_with_cursor
 def count_members(cur, chat_id: int) -> int:

@@ -17,20 +17,51 @@ except ImportError:
     GetForumTopicsRequest = None
 from .database import (_db_pool, get_registered_groups, is_daily_stats_enabled, 
                     get_all_group_ids, get_clean_deleted_settings, get_agg_rows, get_last_agg_stat_date, guess_agg_start_date,
-                    purge_deleted_members, get_group_stats, get_night_mode, upsert_forum_topic, prune_old_stats) # <-- HIER HINZUGEFÜGT
+                    purge_deleted_members, get_group_stats, get_night_mode, upsert_forum_topic, prune_old_stats, is_pro_chat) # <-- HIER HINZUGEFÜGT
 from .statistic import (
     DEVELOPER_IDS, get_group_meta, fetch_message_stats,
     compute_response_times, fetch_media_and_poll_stats, get_member_stats, 
     get_message_insights, get_engagement_metrics, get_trend_analysis, update_group_activity_score, 
     migrate_stats_rollup, compute_agg_group_day, upsert_agg_group_day)
 from telegram.constants import ParseMode
-from .utils import clean_delete_accounts_for_chat, _apply_hard_permissions, cleanup_removed_chats
-
-
+from .utils import clean_delete_accounts_for_chat, _apply_hard_permissions, cleanup_removed_chats, import_member_ids_light
 
 logger = logging.getLogger(__name__)
 CHANNEL_USERNAMES = [u.strip() for u in os.getenv("STATS_CHANNELS", "").split(",") if u.strip()]
 TIMEZONE = os.getenv("TZ", "Europe/Berlin")
+
+async def pro_auto_import_light_job(context: ContextTypes.DEFAULT_TYPE):
+    """PRO-Feature: 1× pro Nacht Member-IDs via Telethon in die DB importieren (throttled).
+
+    Ziel: Free muss NICHT alle Member importieren; PRO bekommt über Nacht eine vollständige ID-Liste,
+    sodass spätere Cleanups/Statistiken sauber auf einer vollständigen Memberbasis laufen können.
+    """
+    try:
+        # Telethon ist ein User-Client (Bots können keine komplette Memberliste lesen)
+        try:
+            await start_telethon()
+        except Exception as e:
+            logger.warning(f"[auto_import_light] Telethon nicht verfügbar: {type(e).__name__}: {e}")
+            return
+
+        group_ids = get_all_group_ids() or []
+        for gid in group_ids:
+            try:
+                if not is_pro_chat(gid):
+                    continue
+                imported = await import_member_ids_light(
+                    gid,
+                    throttle_every=250,
+                    throttle_sleep=0.15,
+                    chunk_size=750,
+                )
+                logger.info(f"[auto_import_light] chat={gid} imported={imported}")
+                await asyncio.sleep(0.75)  # Pause zwischen Gruppen
+            except Exception as e:
+                logger.warning(f"[auto_import_light] chat={gid} failed: {type(e).__name__}: {e}", exc_info=True)
+    except Exception as e:
+        logger.warning(f"[auto_import_light] job failed: {type(e).__name__}: {e}", exc_info=True)
+
 
 async def reconcile_agg_recent(context: ContextTypes.DEFAULT_TYPE, days: int = 45):
     """
@@ -569,6 +600,13 @@ def register_jobs(app):
         name="cleanup_removed_chats"
     )
 
+    # PRO: Auto-Import light (Telethon) – 1× pro Nacht
+    jq.run_daily(
+        pro_auto_import_light_job,
+        time(hour=2, minute=30, tzinfo=ZoneInfo(TIMEZONE)),
+        name="pro_auto_import_light"
+    )
+
     # Täglich in der Nacht: evtl. Lücken automatisch schließen
     jq.run_daily(backfill_missing_agg, time(hour=4, minute=30, tzinfo=ZoneInfo(TIMEZONE)), name="agg_backfill_daily")
     
@@ -599,6 +637,9 @@ def register_jobs(app):
             cfg = get_clean_deleted_settings(gid) or {}
             if not cfg.get("enabled"):
                 continue
+             # Free-Version: kein Auto-Run (nur manuell)
+            if not is_pro_chat(gid):
+                continue
             if cfg.get("weekday") is not None and int(cfg["weekday"]) != now.weekday():
                 continue
             hh = int(cfg.get("hh", 3))
@@ -606,7 +647,11 @@ def register_jobs(app):
             # Auslösen in dem 5-Minuten-Fenster, in dem der Ticker läuft
             if now.hour == hh and now.minute in {mm, (mm+1)%60, (mm+2)%60, (mm+3)%60, (mm+4)%60}:
                 try:
-                    cnt = await clean_delete_accounts_for_chat(gid, ctx.bot, demote_admins=bool(cfg.get("demote")))
+                    cnt = await clean_delete_accounts_for_chat(
+                            gid, ctx.bot,
+                            demote_admins=bool(cfg.get("demote")),
+                            source="telethon"
+                        )
                     if cfg.get("notify"):
                         try:
                             await ctx.bot.send_message(gid, f"✅ Aufgeräumt: {cnt or 0} gelöschte Accounts entfernt.")

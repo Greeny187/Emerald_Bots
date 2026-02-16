@@ -806,6 +806,14 @@ async def _save_from_payload(cid:int, uid:int, data:dict, app:Application|None) 
 
     # --- Clean Deleted: Scheduler speichern & Sofort-Aktion ---
     try:
+        # PRO-Check (Free: nur manuell, kein Zeitplan/Auto)
+        sub = {}
+        try:
+            sub = db["get_subscription_info"](cid) or {}
+        except Exception:
+            sub = {}
+        is_pro = bool(sub.get("active")) and (sub.get("tier") in ("pro", "pro_plus"))
+
         cd = data.get("clean_deleted") or None
         if cd is not None:
             hh, mm = 3, 0
@@ -816,23 +824,48 @@ async def _save_from_payload(cid:int, uid:int, data:dict, app:Application|None) 
             wd = cd.get("weekday", None)
             if wd == "" or wd is False:
                 wd = None
-            db["set_clean_deleted_settings"](cid,
-                enabled = bool(cd.get("enabled")),
-                hh = int(hh), mm = int(mm),
-                weekday = wd if wd is None else int(wd),
-                demote = bool(cd.get("demote")),
-                notify = bool(cd.get("notify")),
+
+            enabled = bool(cd.get("enabled"))
+            if enabled and not is_pro:
+                enabled = False
+                errors.append("CleanDelete: Zeitplan/Auto-Run nur in PRO (Free: nur manuell).")
+
+            db["set_clean_deleted_settings"](
+                cid,
+                enabled=enabled,
+                hh=int(hh), mm=int(mm),
+                weekday=wd if wd is None else int(wd),
+                demote=bool(cd.get("demote")),
+                notify=bool(cd.get("notify")),
             )
-        if data.get("clean_delete_now"):
+
+        if data.get("clean_delete_now") and app:
             from .utils import clean_delete_accounts_for_chat
-            
+
+            # Free: DB-Scan (nur was du bereits getracktst). PRO: Telethon/Auto.
+            source = "auto" if is_pro else "db"
+            # demote aus Payload oder DB fallback
+            try:
+                demote = bool((cd or {}).get("demote"))
+            except Exception:
+                demote = False
+            if cd is None:
+                try:
+                    demote = bool((db["get_clean_deleted_settings"](cid) or {}).get("demote"))
+                except Exception:
+                    pass
+
             async def _clean_delete_task():
                 try:
-                    result = await clean_delete_accounts_for_chat(cid, app.bot)
+                    result = await clean_delete_accounts_for_chat(
+                        cid, app.bot,
+                        demote_admins=demote,
+                        source=source,
+                    )
                     logger.info(f"[miniapp] Clean delete completed for cid={cid}, removed={result}")
                 except Exception as e:
                     logger.error(f"[miniapp] Clean delete failed for cid={cid}: {e}", exc_info=True)
-            
+
             asyncio.create_task(_clean_delete_task())
     except Exception as e:
         errors.append(f"CleanDelete: {e}")
@@ -930,22 +963,6 @@ async def _save_from_payload(cid:int, uid:int, data:dict, app:Application|None) 
             logger.info(f"[miniapp] PRO config saved for cid={cid}")
     except Exception as e:
         errors.append(f"PRO Payment: {e}")
-
-        # --- Clean Deleted Accounts (Einmal-Aktion) ---
-    try:
-        if data.get("clean_delete_now"):
-            from .utils import clean_delete_accounts_for_chat
-            
-            async def _clean_delete_task_route():
-                try:
-                    result = await clean_delete_accounts_for_chat(cid, app.bot)
-                    logger.info(f"[miniapp] Clean delete completed for cid={cid}, removed={result}")
-                except Exception as e:
-                    logger.error(f"[miniapp] Clean delete failed for cid={cid}: {e}", exc_info=True)
-            
-            asyncio.create_task(_clean_delete_task_route())
-    except Exception as e:
-        errors.append(f"CleanDelete: {e}")
 
     # --- Story-Sharing speichern (pro Gruppe) ---
     try:

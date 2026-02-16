@@ -6,7 +6,6 @@ Comprehensive logging enabled for function verification.
 """
 
 import logging
-import os
 import asyncio
 from telegram.ext import Application
 

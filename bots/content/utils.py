@@ -4,7 +4,7 @@ import logging
 from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.ext import ExtBot
 from telegram import ChatMember, ChatPermissions
-from .database import list_members, delete_group_data, mark_member_deleted, get_registered_groups
+from .database import list_members, delete_group_data, mark_member_deleted, get_registered_groups, add_members_bulk
 
 logger = logging.getLogger(__name__)
 
@@ -536,6 +536,83 @@ async def clean_delete_accounts_for_chat(chat_id: int, bot: ExtBot, *,
 
     logger.info(f"[clean_delete] Cleanup complete for {chat_id}: removed {removed} deleted accounts (dry_run={dry_run}, source={src})")
     return removed
+
+async def import_member_ids_light(
+    chat_id: int,
+    *,
+    limit: int | None = None,
+    chunk_size: int = 750,
+    throttle_every: int = 250,
+    throttle_sleep: float = 0.15,
+) -> int:
+    """PRO Auto-Import light: importiert NUR Member-IDs via Telethon in die DB.
+
+    Wichtig: Der Bot-API selbst kann keine komplette Memberliste abrufen.
+    Telethon (User-Session) kann das – daher PRO-Feature.
+
+    Rückgabe: Anzahl der IDs, die wir in die DB geschrieben haben (Duplikate werden ignoriert).
+    """
+    try:
+        from shared.telethon_client import start_telethon, telethon_client
+        await start_telethon()
+    except Exception as e:
+        logger.warning(f"[auto_import_light] Telethon nicht verfügbar für chat={chat_id}: {type(e).__name__}: {e}")
+        return 0
+
+    try:
+        entity = await telethon_client.get_entity(chat_id)
+    except Exception as e:
+        logger.warning(f"[auto_import_light] get_entity failed chat={chat_id}: {type(e).__name__}: {e}")
+        return 0
+
+    imported_total = 0
+    scanned = 0
+    member = None  # defensiv: verhindert UnboundLocalError bei Edge-Cases
+    buf: list[int] = []
+
+    try:
+        from telethon.errors import FloodWaitError
+    except Exception:
+        FloodWaitError = None  # type: ignore
+
+    try:
+        async for u in telethon_client.iter_participants(entity, aggressive=True, limit=limit):
+            uid = int(getattr(u, "id", 0) or 0)
+            if uid <= 0:
+                continue
+
+            buf.append(uid)
+            scanned += 1
+
+            if len(buf) >= chunk_size:
+                try:
+                    imported_total += add_members_bulk(chat_id, buf, log=False)
+                except Exception as e:
+                    logger.debug(f"[auto_import_light] bulk insert failed chat={chat_id}: {e}")
+                buf.clear()
+
+            if throttle_every and scanned % throttle_every == 0:
+                await asyncio.sleep(max(0.0, float(throttle_sleep)))
+
+        if buf:
+            try:
+                imported_total += add_members_bulk(chat_id, buf, log=False)
+            except Exception as e:
+                logger.debug(f"[auto_import_light] bulk insert failed chat={chat_id}: {e}")
+            buf.clear()
+
+    except Exception as e:
+        # FloodWait elegant abfedern (wenn Telethon/Telegram bremst)
+        if FloodWaitError and isinstance(e, FloodWaitError):
+            sec = int(getattr(e, "seconds", 5) or 5)
+            logger.warning(f"[auto_import_light] FloodWait chat={chat_id}: sleep {sec}s")
+            await asyncio.sleep(sec + 1)
+        else:
+            logger.warning(f"[auto_import_light] scan failed chat={chat_id}: {type(e).__name__}: {e}")
+
+    logger.info(f"[auto_import_light] chat={chat_id} scanned={scanned} imported={imported_total} (limit={limit})")
+    return imported_total
+
 
 async def cleanup_removed_chats(context) -> None:
     """
