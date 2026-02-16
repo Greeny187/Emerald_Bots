@@ -136,8 +136,26 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         counts = await _call_db(get_mood_counts, chat.id, message_id)
         
         # Text mit aktuellen Zählungen aktualisieren
-        original_text = query.message.text
-        txt = f"{original_text}\n\n👍 {counts.get('like',0)} | 👎 {counts.get('dislike',0)} | 🤔 {counts.get('think',0)}"
+        # Basistext ohne alte Zählerzeile(n)
+        base = (query.message.text or "")
+        marker = "\n\n👍 "
+        if marker in base:
+            base = base.split(marker, 1)[0].rstrip()
+
+        like = int(counts.get("like", 0) or 0)
+        dislike = int(counts.get("dislike", 0) or 0)
+        think = int(counts.get("think", 0) or 0)
+        total = like + dislike + think
+
+        def pct(n: int) -> int:
+            return int(round((n / total) * 100)) if total > 0 else 0
+
+        txt = (
+            f"{base}\n\n"
+            f"👍 {like} ({pct(like)}%)   "
+            f"👎 {dislike} ({pct(dislike)}%)   "
+            f"🤔 {think} ({pct(think)}%)"
+        )
         
         # Message mit neuen Zählungen editieren
         await query.edit_message_text(
